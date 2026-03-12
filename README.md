@@ -1,45 +1,24 @@
-# 🏎️ F1 Game Center — Streamlit
+# 🏎️ F1 Game Center v2 — Streamlit
 
-Juego de F1 con 6 modos: Grid Challenge, Podium Challenge, Duelo de Pilotos,
-Constructor Challenge, Línea de Tiempo y ¿Quién Soy?
+## 9 modos de juego:
+1. 🔲 Grid Challenge — Completá la grilla con pilotos
+2. 🏆 Podium Challenge — Adiviná el top 10 de un GP histórico
+3. ⚔️ Duelo de Pilotos — ¿Quién tiene más victorias/podios/títulos?
+4. 🏗️ Constructor Challenge — Adiviná la escudería
+5. 📅 Línea de Tiempo — Ordená eventos cronológicamente
+6. 🕵️ Piloto Misterioso — Pistas progresivas sobre un piloto
+7. 🔗 Cadena de Pilotos — Conectá pilotos por compañeros de equipo
+8. 🏁 ¿Quién Ganó? — Adiviná el ganador de un GP
+9. 🗺️ ¿En qué Circuito? — Adiviná el circuito por sus características
 
----
+## Deploy en Streamlit Cloud:
+1. Subí los archivos a un repo GitHub
+2. Entrá a share.streamlit.io
+3. Conectá el repo y apuntá a app.py
+4. ¡Listo!
 
-## Cómo ejecutarlo localmente
-
-### 1. Instalá Python
-Si no tenés Python instalado, bajalo de https://python.org (versión 3.9 o más nueva).
-
-### 2. Instalá Streamlit
-Abrí una terminal (cmd en Windows, Terminal en Mac/Linux) y escribí:
-```
+## Local:
+```bash
 pip install streamlit
-```
-
-### 3. Ejecutá el juego
-En la terminal, navegá a esta carpeta y ejecutá:
-```
 streamlit run app.py
 ```
-
-Se va a abrir automáticamente en tu navegador en http://localhost:8501
-
----
-
-## Cómo subirlo gratis a internet (Streamlit Cloud)
-
-1. Creá una cuenta gratis en https://github.com y otra en https://streamlit.io
-2. Subí estos 3 archivos a un repositorio de GitHub:
-   - `app.py`
-   - `f1_data.py`
-   - `requirements.txt`
-3. En https://share.streamlit.io → "New app" → elegí tu repositorio
-4. En "Main file path" escribí `app.py`
-5. Hacé click en "Deploy" — en 2-3 minutos tenés la URL pública
-
----
-
-## Archivos
-- `app.py` — Interfaz web (Streamlit)
-- `f1_data.py` — Base de datos y lógica del juego
-- `requirements.txt` — Dependencias
