@@ -1493,292 +1493,1900 @@ def normalize(s):
 # ══════════════════════════════════════════════════════════════════
 #  CLASE PRINCIPAL DEL JUEGO
 # ══════════════════════════════════════════════════════════════════
+class GridGame:
+    def __init__(self):
+        self.series_name   = "🏎️ Fórmula 1"
+        self.series        = SERIES_MAP["🏎️ Fórmula 1"]
+        self.difficulty    = "🟡 Medio"
+        self.cfg           = DIFFICULTY_CONFIG[self.difficulty]
+        self.row_cats      = []
+        self.col_cats      = []
+        self.inputs        = {}
+        self.grid_config   = {}
+        self.start_time    = None
+        self.timer_running = False
+        self.timer_thread  = None
+        self._current_color = "#e10600"
+        self.daily_mode       = False
+        self._pregen_result   = None   # pre-generated (row_cats, col_cats)
+        self._pregen_series   = None   # qué serie generó el pregen (para validar)
+        self._pregen_diff     = None   # qué dificultad generó el pregen
+        self._pregen_thread   = None
+        self.total_pts        = 0      # cumulative score across sessions
+        self._build_ui()
 
+    # ── UI ───────────────────────────────────────────────────────
+    def _build_ui(self):
+        self.output = widgets.Output()
+
+        # ── Selector de serie (F1 / F2) ──
+        self.series_toggle = widgets.ToggleButtons(
+            options=["🏎️ Fórmula 1", "🚀 Fórmula 2", "🔵 Fórmula 3", "🔀 Modo Mixto"],
+            value=self.series_name,
+            description='',
+            button_style='',
+            style={'button_width': '140px', 'font_weight': 'bold'},
+        )
+        self.series_toggle.observe(self._on_series_change, names='value')
+
+        series_label = widgets.HTML(
+            "<b style='font-size:13px'>Serie:</b>"
+        )
+
+        # ── Selector de dificultad ──
+        self.diff_selector = widgets.ToggleButtons(
+            options=list(DIFFICULTY_CONFIG.keys()),
+            value=self.difficulty,
+            description='',
+            style={'button_width': '128px'},
+            layout=widgets.Layout(margin='4px 0'),
+        )
+        self.diff_desc = widgets.HTML(
+            f"<i style='color:gray;font-size:12px'>{self.cfg['description']}</i>"
+        )
+        self.diff_selector.observe(self._on_difficulty_change, names='value')
+        diff_label = widgets.HTML("<b style='font-size:13px'>Dificultad:</b>")
+
+        # ── Botón nueva partida ──
+        self.btn_new = widgets.Button(
+            description="▶ Nueva Partida",
+            button_style='danger',
+            layout=widgets.Layout(width='155px', height='36px'),
+        )
+        self.btn_new.on_click(self._start_game)
+
+        # ── Timer y score ──
+        self.time_label = widgets.HTML(
+            "<span style='font-family:monospace;font-size:18px;font-weight:bold'>⏱ --:--</span>"
+        )
+        self.score_label = widgets.HTML(
+            "<span style='font-family:monospace;font-size:14px'>✅ 0/0</span>"
+        )
+
+        # ── Título dinámico ──
+        self.title_html = widgets.HTML(self._title_markup())
+
+        # ── Botones verificar / soluciones ──
+        self.btn_check = widgets.Button(
+            description="✔ Verificar", button_style='success',
+            layout=widgets.Layout(width='130px'), disabled=True,
+        )
+        self.btn_solutions = widgets.Button(
+            description="💡 Soluciones", button_style='info',
+            layout=widgets.Layout(width='130px'), disabled=True,
+        )
+        self.btn_history = widgets.Button(
+            description="📋 Historial", button_style='',
+            layout=widgets.Layout(width='120px'),
+        )
+        self.btn_check.on_click(self._check)
+        self.btn_solutions.on_click(self._show_solutions)
+        self.btn_history.on_click(self._show_history)
+
+        # ── Botón modo diario ──
+        self.daily_btn = widgets.ToggleButton(
+            value=False, description="📅 Diario OFF",
+            button_style='', layout=widgets.Layout(width='130px'),
+        )
+        self.daily_btn.observe(self._toggle_daily, names='value')
+        self.streak_label = widgets.HTML(
+            "<span style='font-family:monospace;font-size:13px'>🔥 0 días</span>"
+        )
+        self._refresh_streak_label()
+
+        self.btn_share = widgets.Button(
+            description="📤 Compartir", button_style='',
+            layout=widgets.Layout(width='120px'), disabled=True,
+        )
+        self.btn_share.on_click(self._share_result)
+
+        self.pts_label = widgets.HTML(
+            "<span style='font-family:monospace;font-size:13px'>⭐ 0 pts</span>"
+        )
+        self._refresh_pts_label()
+
+        self.grid_out = widgets.Output()
+
+        # ── Layout ──
+        top_bar = widgets.HBox([
+            widgets.VBox([self.title_html,
+                          series_label, self.series_toggle]),
+            widgets.VBox([diff_label, self.diff_selector, self.diff_desc]),
+        ], layout=widgets.Layout(justify_content='space-between',
+                                  align_items='flex-start', gap='20px'))
+
+        action_bar = widgets.HBox(
+            [self.btn_new, self.btn_check, self.btn_solutions, self.daily_btn,
+             self.btn_history, self.btn_share,
+             self.time_label, self.score_label, self.pts_label, self.streak_label],
+            layout=widgets.Layout(align_items='center', gap='8px', margin='8px 0',
+                                  flex_flow='row wrap'),
+        )
+
+        self.main_widget = widgets.VBox(
+            [top_bar, action_bar, self.grid_out, self.output],
+            layout=widgets.Layout(padding='14px', border='2px solid #e10600',
+                                   border_radius='10px', max_width='960px'),
+        )
+        display(self.main_widget)
+        # Kick off pre-generation immediately on load
+        self._start_pregen()
+
+    def _title_markup(self):
+        if "Fórmula 1" in self.series_name:
+            color, label, icon = "#e10600", "FÓRMULA 1", "🏎️"
+        elif "Fórmula 2" in self.series_name:
+            color, label, icon = "#1565c0", "FÓRMULA 2", "🚀"
+        elif "Fórmula 3" in self.series_name:
+            color, label, icon = "#2e7d32", "FÓRMULA 3", "🔵"
+        else:
+            color, label, icon = "#6a1b9a", "MODO MIXTO F1+F2+F3", "🔀"
+        self._current_color = color
+        subtitle = ("Equipos · Nac · Victorias · Podios · Campeón"
+                    if "Mixto" not in label
+                    else "Cruza F1+F2+F3 · Equipos · Academias · Multi-serie · Campeones")
+        return (
+            f"<h2 style='font-family:monospace;color:{color};margin:0'>"
+            f"{icon} {label} GRID CHALLENGE</h2>"
+            f"<p style='font-family:monospace;font-size:11px;color:#888;margin:2px 0 0'>"
+            f"{subtitle}</p>"
+        )
+
+    def _refresh_pts_label(self):
+        data = self._load_data()
+        pts  = data.get("total_pts", 0)
+        self.total_pts = pts
+        self.pts_label.value = (
+            f"<span style='font-family:monospace;font-size:13px'>⭐ {pts} pts</span>"
+        )
+
+    def _refresh_streak_label(self):
+        s = self._load_streak()
+        self.streak_label.value = (
+            f"<span style='font-family:monospace;font-size:13px'>"
+            f"🔥 {s['current']} días &nbsp; 🏅 {s['best']}</span>"
+        )
+
+    # ── Cambios de serie y dificultad ────────────────────────────
+    def _on_series_change(self, change):
+        self.series_name = change['new']
+        self.series      = SERIES_MAP[self.series_name]
+        self.title_html.value = self._title_markup()
+        self.main_widget.layout.border = f"2px solid {self._current_color}"
+        self._start_pregen()
+        with self.output:
+            clear_output()
+
+    def _on_difficulty_change(self, change):
+        self.difficulty = change['new']
+        self.cfg        = DIFFICULTY_CONFIG[self.difficulty]
+        self.diff_desc.value = f"<i style='color:gray;font-size:12px'>{self.cfg['description']}</i>"
+        # Restart pre-generation for new config
+        self._start_pregen()
+
+    # ── Pre-generación en hilo ───────────────────────────────────
+    def _start_pregen(self):
+        """Generate next grid in background so _start_game is instant."""
+        import threading as _threading
+        if self._pregen_thread and self._pregen_thread.is_alive():
+            return  # already running
+        self._pregen_result = None
+        cfg_snap     = DIFFICULTY_CONFIG[self.difficulty]
+        series_snap  = self.series
+
+        def _run():
+            try:
+                result = series_snap.generate_grid(cfg_snap)
+                self._pregen_result = result
+                self._pregen_series = series_snap
+                self._pregen_diff   = self.difficulty
+            except Exception:
+                self._pregen_result = None
+
+        t = _threading.Thread(target=_run, daemon=True)
+        t.start()
+        self._pregen_thread = t
+
+    # ── Iniciar partida ──────────────────────────────────────────
+    def _start_game(self, b=None):
+        self._stop_timer()
+        self.cfg = DIFFICULTY_CONFIG[self.difficulty]
+        self.btn_share.disabled = True
+        self._last_result = None  # reset share state
+
+        if self.daily_mode:
+            if self._already_played_today():
+                import datetime
+                with self.output:
+                    clear_output()
+                    print(f"🔒 Ya jugaste el grid del día de hoy")
+                    print(f"   {datetime.date.today().isoformat()} · {self.series_name} · {self.difficulty}")
+                    streak = self._load_streak()
+                    print(f"\n🔥 Racha: {streak['current']} días  |  🏅 Mejor: {streak['best']} días")
+                    print(f"\n¡Vuelve mañana para el siguiente grid!")
+                return
+            seed  = self._daily_seed()
+            state = random.getstate()
+            random.seed(seed)
+            self.row_cats, self.col_cats = self.series.generate_grid(self.cfg)
+            random.setstate(state)
+            import datetime
+            with self.output:
+                clear_output()
+                print(f"📅 Grid del día — {datetime.date.today().isoformat()}")
+                print(f"🔒 Misma semilla para todos · {self.series_name} · {self.difficulty}")
+        else:
+            # Usar pregen solo si corresponde a la serie y dificultad actuales
+            pregen_valido = (
+                self._pregen_result is not None and
+                self._pregen_series is self.series and
+                self._pregen_diff   == self.difficulty
+            )
+            if pregen_valido:
+                self.row_cats, self.col_cats = self._pregen_result
+                self._pregen_result = None
+            else:
+                self.row_cats, self.col_cats = self.series.generate_grid(self.cfg)
+            with self.output:
+                clear_output()
+
+        self._build_grid()
+        self._start_timer()
+        self.btn_check.disabled     = False
+        self.btn_solutions.disabled = False
+        # Pre-generate next grid in background
+        self._start_pregen()
+
+    # ── Construir grid ───────────────────────────────────────────
+    def _build_grid(self):
+        size   = self.cfg["grid_size"]
+        cell_w = '185px'
+        cell_h = '36px'
+        self.inputs      = {}
+        self.grid_config = {}
+
+        if "Fórmula 1" in self.series_name:
+            hdr_color_col, hdr_color_row = "#e10600", "#1565c0"
+        elif "Fórmula 2" in self.series_name:
+            hdr_color_col, hdr_color_row = "#1565c0", "#e10600"
+        elif "Fórmula 3" in self.series_name:
+            hdr_color_col, hdr_color_row = "#2e7d32", "#1b5e20"
+        else:  # Modo Mixto
+            hdr_color_col, hdr_color_row = "#6a1b9a", "#4a148c"
+
+        def hdr(label, color):
+            return widgets.HTML(
+                f"<div style='width:{cell_w};text-align:center;font-family:monospace;"
+                f"font-weight:bold;font-size:11px;color:{color};"
+                f"padding:4px 2px;line-height:1.3'>{label}</div>"
+            )
+
+        # Lista de nombres formateados para el Combobox (Title Case)
+        driver_options = sorted(
+            d.title() for d in self.series.all_drivers
+        )
+
+        top_row   = [widgets.HTML(f"<div style='width:{cell_w}'></div>")]
+        top_row  += [hdr(c["label"], hdr_color_col) for c in self.col_cats]
+        rows_w    = [widgets.HBox(top_row)]
+
+        for r in range(size):
+            row_w = [hdr(self.row_cats[r]["label"], hdr_color_row)]
+            for c in range(size):
+                cid = f"{r}-{c}"
+                self.grid_config[cid] = {
+                    "row_cat": self.row_cats[r],
+                    "col_cat": self.col_cats[c],
+                }
+                # Combobox: campo de texto con lista desplegable de sugerencias
+                combo = widgets.Combobox(
+                    placeholder="Escribe un piloto...",
+                    options=driver_options,
+                    ensure_option=False,
+                    layout=widgets.Layout(width=cell_w, height=cell_h),
+                )
+                # Live feedback: green if valid driver in DB, yellow if typing, grey if empty
+                def _on_change(change, _cid=cid):
+                    txt    = self.inputs[_cid]
+                    driver = normalize(change['new'])
+                    if driver == "":
+                        txt.layout.border = "2px solid #ccc"
+                    elif driver in self.series.drivers_meta:
+                        rc = self.grid_config[_cid]["row_cat"]
+                        cc = self.grid_config[_cid]["col_cat"]
+                        if rc["check"](driver) and cc["check"](driver):
+                            txt.layout.border = "3px solid #2e7d32"  # green = correct
+                        else:
+                            txt.layout.border = "3px solid #e10600"  # red = wrong cell
+                    else:
+                        txt.layout.border = "2px solid #f9a825"  # yellow = not in DB yet
+                combo.observe(_on_change, names='value')
+                self.inputs[cid] = combo
+                row_w.append(combo)
+            rows_w.append(widgets.HBox(row_w, layout=widgets.Layout(gap='4px')))
+
+        with self.grid_out:
+            clear_output(wait=True)
+            display(widgets.VBox(rows_w, layout=widgets.Layout(gap='4px')))
+
+        total = size * size
+        self.score_label.value = (
+            f"<span style='font-family:monospace;font-size:14px'>✅ 0/{total}</span>"
+        )
+
+    # ── Timer ─────────────────────────────────────────────────────
+    def _start_timer(self):
+        self.start_time    = time.time()
+        self.timer_running = True
+        limit = self.cfg.get("time_limit")
+
+        def run():
+            while self.timer_running:
+                elapsed = int(time.time() - self.start_time)
+                if limit:
+                    remaining = max(0, limit - elapsed)
+                    mm, ss    = divmod(remaining, 60)
+                    color     = "#e10600" if remaining <= 30 else "#333"
+                    self.time_label.value = (
+                        f"<span style='font-family:monospace;font-size:18px;"
+                        f"font-weight:bold;color:{color}'>⏱ {mm:02d}:{ss:02d}</span>"
+                    )
+                    if remaining == 0:
+                        self.timer_running = False
+                        with self.output:
+                            clear_output()
+                            print("⏰ ¡Tiempo agotado!")
+                        break
+                else:
+                    mm, ss = divmod(elapsed, 60)
+                    self.time_label.value = (
+                        f"<span style='font-family:monospace;font-size:18px;"
+                        f"font-weight:bold'>⏱ {mm:02d}:{ss:02d}</span>"
+                    )
+                time.sleep(1)
+
+        self.timer_thread = threading.Thread(target=run, daemon=True)
+        self.timer_thread.start()
+
+    def _stop_timer(self):
+        self.timer_running = False
+        if self.timer_thread:
+            self.timer_thread.join(timeout=1.5)
+
+    # ── Verificar ─────────────────────────────────────────────────
+    def _check(self, b):
+        size         = self.cfg["grid_size"]
+        allow_repeat = self.cfg.get("allow_repeat", False)
+        used         = set()
+        correct      = 0
+        total        = size * size
+        is_mixed     = isinstance(self.series, MixedSeries)
+
+        with self.output:
+            clear_output()
+            msgs = []
+
+            for r in range(size):
+                for c in range(size):
+                    cid    = f"{r}-{c}"
+                    txt    = self.inputs[cid]
+                    driver = normalize(txt.value)
+
+                    if driver == "":
+                        txt.layout.border = "2px solid #ccc"
+                        continue
+
+                    if driver not in self.series.drivers_meta:
+                        txt.layout.border = "3px solid #e10600"
+                        msgs.append(f"❌ '{txt.value}' no está en la base de datos")
+                        continue
+
+                    rc       = self.grid_config[cid]["row_cat"]
+                    cc       = self.grid_config[cid]["col_cat"]
+                    possible = self.series.drivers_satisfying(rc, cc)
+
+                    if driver in used and (not allow_repeat or len(possible) > 1):
+                        txt.layout.border = "3px solid orange"
+                        msgs.append(f"🔁 '{txt.value}' ya fue usado")
+                        continue
+
+                    if rc["check"](driver) and cc["check"](driver):
+                        txt.layout.border = "3px solid #2e7d32"
+                        used.add(driver)
+                        correct += 1
+                        if is_mixed:
+                            dm = self.series.drivers_meta[driver]
+                            msgs.append(f"✅ {txt.value.title()} | {dm['nationality']}")
+                        else:
+                            m = self.series.drivers_meta[driver]
+                            msgs.append(
+                                f"✅ {txt.value.title()} | {m['nationality']} | "
+                                f"{m['wins']}V {m['podiums']}P {'🏆' if m['champion'] else ''}"
+                            )
+                    else:
+                        txt.layout.border = "3px solid #e10600"
+                        msgs.append(
+                            f"❌ {txt.value} no cumple: [{rc['label']}] + [{cc['label']}]"
+                        )
+
+            self.score_label.value = (
+                f"<span style='font-family:monospace;font-size:14px'>"
+                f"✅ {correct}/{total}</span>"
+            )
+            for msg in msgs:
+                print(msg)
+
+            elapsed = int(time.time() - self.start_time) if self.start_time else 0
+            all_ok  = correct == total and not any(
+                m.startswith("❌") or m.startswith("🔁") for m in msgs
+            )
+
+            # Always record the attempt (even partial)
+            self._record_game(correct, total, elapsed, all_ok)
+
+            if all_ok:
+                self._stop_timer()
+                mm, ss = divmod(elapsed, 60)
+                diff_multiplier = {"🟢 Fácil": 1, "🟡 Medio": 2, "🔴 Difícil": 3, "💀 Experto": 5}
+                mult    = diff_multiplier.get(self.difficulty, 1)
+                base    = correct * 100 * mult
+                time_lim = self.cfg.get("time_limit")
+                bonus   = max(0, time_lim - elapsed) * 5 * mult if time_lim else 0
+                pts     = base + bonus
+                print(f"\n🏆 ¡GRID COMPLETO!  {self.series_name} · {self.difficulty}")
+                print(f"⏱ Tiempo: {mm:02d}:{ss:02d}  ·  ⭐ {pts} pts (×{mult} dificultad)")
+                if bonus > 0:
+                    print(f"   Bonus velocidad: +{bonus} pts")
+                if self.daily_mode:
+                    self._mark_daily_played()
+                    streak = self._save_streak(completed_today=True)
+                    self._refresh_streak_label()
+                    print(f"🔥 Racha: {streak['current']} días  |  🏅 Mejor: {streak['best']} días")
+                print(f"\n📤 Pulsa 'Compartir' para copiar tu resultado")
+
+    # ── Soluciones ────────────────────────────────────────────────
+    def _show_solutions(self, b):
+        size = self.cfg["grid_size"]
+        with self.output:
+            clear_output()
+            print("💡 Soluciones posibles:\n")
+            for r in range(size):
+                for c in range(size):
+                    rc  = self.row_cats[r]
+                    cc  = self.col_cats[c]
+                    sol = sorted(self.series.drivers_satisfying(rc, cc))
+                    print(f"  [{rc['label']}]  ✕  [{cc['label']}]:")
+                    print("    " + " | ".join(d.title() for d in sol))
+                    print()
+
+    # ── Modo diario ──────────────────────────────────────────────
+    def _toggle_daily(self, change):
+        self.daily_mode = change['new']
+        self.daily_btn.description = "📅 Diario ON" if self.daily_mode else "📅 Diario OFF"
+        self.daily_btn.button_style = 'warning' if self.daily_mode else ''
+        with self.output:
+            clear_output()
+            if self.daily_mode:
+                import datetime
+                today  = datetime.date.today().isoformat()
+                data   = self._load_data()
+                streak = data.get("streak", {"current": 0, "best": 0, "last_date": ""})
+                played = self._already_played_today()
+                print(f"📅 Modo Diario activado — {today}")
+                print(f"🔥 Racha actual: {streak['current']} días  |  🏅 Mejor racha: {streak['best']} días")
+                if played:
+                    print(f"✅ Ya jugaste el diario de hoy ({self.series_name} · {self.difficulty}). ¡Vuelve mañana!")
+                else:
+                    print(f"⚠️  Pulsa 'Nueva Partida' para el grid del día ({self.series_name} · {self.difficulty})")
+
+    # ── Persistencia unificada ────────────────────────────────────
+    def _data_path(self):
+        import os
+        return os.path.expanduser('~/.f1grid_data.json')
+
+    def _load_data(self):
+        import json, os
+        try:
+            p = self._data_path()
+            if os.path.exists(p):
+                with open(p) as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {
+            "streak":  {"current": 0, "best": 0, "last_date": ""},
+            "history": [],          # list of game records
+            "daily_played": {},     # {"YYYY-MM-DD|serie|diff": bool}
+        }
+
+    def _save_data(self, data):
+        import json
+        try:
+            with open(self._data_path(), 'w') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _load_streak(self):
+        return self._load_data().get("streak", {"current": 0, "best": 0, "last_date": ""})
+
+    def _already_played_today(self):
+        import datetime
+        today = datetime.date.today().isoformat()
+        key   = f"{today}|{self.series_name}|{self.difficulty}"
+        data  = self._load_data()
+        return data.get("daily_played", {}).get(key, False)
+
+    def _mark_daily_played(self):
+        import datetime
+        today = datetime.date.today().isoformat()
+        key   = f"{today}|{self.series_name}|{self.difficulty}"
+        data  = self._load_data()
+        data.setdefault("daily_played", {})[key] = True
+        self._save_data(data)
+
+    def _save_streak(self, completed_today):
+        import datetime
+        data      = self._load_data()
+        streak    = data.get("streak", {"current": 0, "best": 0, "last_date": ""})
+        today     = datetime.date.today().isoformat()
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        if completed_today:
+            if streak["last_date"] == today:
+                pass
+            elif streak["last_date"] == yesterday:
+                streak["current"] += 1
+                streak["best"] = max(streak["best"], streak["current"])
+                streak["last_date"] = today
+            else:
+                streak["current"] = 1
+                streak["best"] = max(streak["best"], 1)
+                streak["last_date"] = today
+        data["streak"] = streak
+        self._save_data(data)
+        return streak
+
+    def _record_game(self, correct, total, elapsed, completed):
+        """Save a game result to history and update cumulative score."""
+        import datetime
+        data = self._load_data()
+
+        # Score calculation
+        diff_multiplier = {"🟢 Fácil": 1, "🟡 Medio": 2, "🔴 Difícil": 3, "💀 Experto": 5}
+        mult     = diff_multiplier.get(self.difficulty, 1)
+        base_pts = correct * 100 * mult
+        time_lim = self.cfg.get("time_limit")
+        bonus    = max(0, time_lim - elapsed) * 5 * mult if time_lim and completed else 0
+        pts_this = base_pts + bonus
+
+        # Add to cumulative
+        data["total_pts"] = data.get("total_pts", 0) + pts_this
+
+        record = {
+            "date":       datetime.date.today().isoformat(),
+            "serie":      self.series_name,
+            "difficulty": self.difficulty,
+            "correct":    correct,
+            "total":      total,
+            "elapsed":    elapsed,
+            "completed":  completed,
+            "daily":      self.daily_mode,
+            "pts":        pts_this,
+        }
+        data.setdefault("history", []).append(record)
+        if len(data["history"]) > 200:
+            data["history"] = data["history"][-200:]
+        self._save_data(data)
+        self._refresh_pts_label()
+
+        # Store for share button
+        self._last_result = record
+        if completed:
+            self.btn_share.disabled = False
+
+    def _daily_seed(self):
+        import datetime, hashlib
+        today  = datetime.date.today().isoformat()
+        key    = f"{today}-{self.series_name}-{self.difficulty}"
+        digest = int(hashlib.md5(key.encode()).hexdigest(), 16)
+        return digest % (2**31)
+
+    # ── Compartir resultado ───────────────────────────────────────
+    def _share_result(self, b=None):
+        r = getattr(self, '_last_result', None)
+        if not r:
+            return
+        import datetime
+        mm, ss = divmod(r.get('elapsed', 0), 60)
+        tiempo = f"{mm:02d}:{ss:02d}"
+        diff   = r['difficulty'].split(' ')[1] if ' ' in r['difficulty'] else r['difficulty']
+        serie  = r['serie'].split(' ')[1] if ' ' in r['serie'] else r['serie']
+        daily  = "📅 Diario · " if r.get('daily') else ""
+        size   = self.cfg['grid_size']
+
+        # Emoji grid — squares showing correct/wrong without spoiling answers
+        rows = self.row_cats
+        cols = self.col_cats
+        grid_emoji = ""
+        for ri in range(size):
+            for ci in range(size):
+                cid    = f"{ri}-{ci}"
+                inp    = self.inputs.get(cid)
+                if inp:
+                    driver = normalize(inp.value)
+                    rc     = self.grid_config[cid]["row_cat"]
+                    cc     = self.grid_config[cid]["col_cat"]
+                    if driver and driver in self.series.drivers_meta and rc["check"](driver) and cc["check"](driver):
+                        grid_emoji += "🟩"
+                    elif driver:
+                        grid_emoji += "🟥"
+                    else:
+                        grid_emoji += "⬜"
+            grid_emoji += "\n"
+
+        text = (
+            f"🏁 F1/F2/F3 Grid Challenge\n"
+            f"{daily}{serie} · {diff} · {r['correct']}/{r['total']} ✅\n"
+            f"⏱ {tiempo}  ⭐ {r.get('pts', 0)} pts\n"
+            f"{r['date']}\n\n"
+            f"{grid_emoji.rstrip()}"
+        )
+
+        with self.output:
+            clear_output()
+            print("📤 Copia este texto para compartir tu resultado:\n")
+            print("─" * 40)
+            print(text)
+            print("─" * 40)
+            print("\n(Selecciona el texto de arriba y cópialo con Ctrl+C)")
+
+    # ── Historial ─────────────────────────────────────────────────
+    def _show_history(self, b=None):
+        data    = self._load_data()
+        history = data.get("history", [])
+        streak  = data.get("streak",  {"current": 0, "best": 0, "last_date": ""})
+        total_pts = data.get("total_pts", 0)
+        with self.output:
+            clear_output()
+            if not history:
+                print("📋 Aún no hay partidas registradas. ¡Juega una partida primero!")
+                return
+
+            print("━" * 54)
+            print(f"  📋  HISTORIAL DE PARTIDAS")
+            print("━" * 54)
+
+            total_games     = len(history)
+            completed_games = sum(1 for g in history if g.get("completed"))
+            pct             = completed_games / total_games * 100 if total_games else 0
+            avg_time_compl  = (
+                sum(g["elapsed"] for g in history if g.get("completed") and g.get("elapsed",0) > 0)
+                / max(completed_games, 1)
+            )
+            am, as_  = divmod(int(avg_time_compl), 60)
+
+            print(f"  Partidas jugadas   : {total_games}")
+            print(f"  Grids completados  : {completed_games}  ({pct:.0f}%)")
+            print(f"  Tiempo medio       : {am:02d}:{as_:02d}  (partidas completadas)")
+            print(f"  ⭐ Puntuación total : {total_pts} pts")
+            print(f"  🔥 Racha actual    : {streak['current']} días")
+            print(f"  🏅 Mejor racha     : {streak['best']} días")
+            print()
+
+            print("  Por serie:")
+            for sname in ["🏎️ Fórmula 1", "🚀 Fórmula 2", "🔵 Fórmula 3", "🔀 Modo Mixto"]:
+                sg = [g for g in history if g.get("serie") == sname]
+                if sg:
+                    sc  = sum(1 for g in sg if g.get("completed"))
+                    sp  = sum(g.get("pts",0) for g in sg)
+                    sn  = sname.split(' ')[1] if ' ' in sname else sname
+                    print(f"    {sn}: {len(sg)} partidas, {sc} completadas ({sc/len(sg)*100:.0f}%) — {sp} pts")
+
+            print()
+            print("  Por dificultad:")
+            for diff in ["🟢 Fácil", "🟡 Medio", "🔴 Difícil", "💀 Experto"]:
+                dg = [g for g in history if g.get("difficulty") == diff]
+                if dg:
+                    dc = sum(1 for g in dg if g.get("completed"))
+                    dp = sum(g.get("pts",0) for g in dg)
+                    dn = diff.split(' ')[1] if ' ' in diff else diff
+                    print(f"    {dn}: {len(dg)} partidas, {dc} completadas ({dc/len(dg)*100:.0f}%) — {dp} pts")
+
+            print()
+            print("  Últimas 10 partidas:")
+            print(f"  {'Fecha':<12} {'Serie':<10} {'Dif':<10} {'Res':<8} {'Tiempo':<8} {'Pts'}")
+            print("  " + "─" * 58)
+            for g in reversed(history[-10:]):
+                mm, ss  = divmod(g.get("elapsed", 0), 60)
+                tiempo  = f"{mm:02d}:{ss:02d}" if g.get("elapsed") else "--:--"
+                result  = f"✅ {g['correct']}/{g['total']}" if g.get("completed") else f"  {g.get('correct',0)}/{g.get('total',0)}"
+                daily_m = "📅" if g.get("daily") else "  "
+                sn      = g.get('serie','?').split(' ')[1] if ' ' in g.get('serie','') else g.get('serie','?')[:6]
+                dn      = g.get('difficulty','?').split(' ')[1] if ' ' in g.get('difficulty','') else g.get('difficulty','?')[:6]
+                pts_g   = g.get('pts', 0)
+                print(f"  {g.get('date','?'):<12} {daily_m}{sn:<9} {dn:<10} {result:<8} {tiempo:<8} {pts_g}")
+            print("━" * 54)
+
+
+
+
+
+
+# ══════════════════════════════════════════════════════════════════
+#  BASE DE DATOS — RESULTADOS DE GP
+# ══════════════════════════════════════════════════════════════════
 GP_RESULTS = {
-    # ── Años 50 ───────────────────────────────────────────────────
     1950: {
-        "Gran Premio de Gran Bretaña":  ["giuseppe farina","luigi fagioli","reg parnell","yves giraud-cabantous","louis rosier","johnnie claes","juan manuel fangio","prince bira","david murray","toulo de graffenried"],
-        "Gran Premio de Mónaco":        ["juan manuel fangio","alberto ascari","luigi villoresi","louis chiron","jose froilan gonzalez","juan manuel fangio","louis rosier","robert manzon","raymond sommer","prince bira"],
-        "Gran Premio de Suiza":         ["giuseppe farina","luigi fagioli","louis rosier","prince bira","toulo de graffenried","juan manuel fangio","jose froilan gonzalez","dorino serafini","peter whitehead","eugene martin"],
-    },
+        "Gran Premio de Gran Bretaña": ["giuseppe farina","luigi fagioli","reg parnell","yves giraud cabantous","louis rosier","bob gerard","cuth harrison","philippe etancelin","peter walker","joe kelly"],
+        "Gran Premio de Mónaco": ["juan manuel fangio","alberto ascari","louis chiron","luigi villoresi","raymond sommer","philippe etancelin","peter whitehead","peter walker","bob gerard","louis rosier"],
+        "Gran Premio de Indianápolis": ["johnnie parsons","bill holland","mauri rose","troy ruttman","duane carter","paul russo","jim rathmann","eddie sack","bill cantrell","johnny mantz"],
+        "Gran Premio de Suiza": ["giuseppe farina","juan manuel fangio","luigi fagioli","peter whitehead","reg parnell","philippe etancelin","yves giraud cabantous","louis rosier","peter walker","louis chiron"],
+        "Gran Premio de Bélgica": ["juan manuel fangio","luigi fagioli","louis rosier","alberto ascari","reg parnell","philippe etancelin","peter whitehead","louis chiron","yves giraud cabantous","raymond sommer"],
+        "Gran Premio de Francia": ["juan manuel fangio","luigi fagioli","jose froilan gonzalez","louis rosier","reg parnell","philippe etancelin","peter whitehead","louis chiron","yves giraud cabantous","raymond sommer"],
+        "Gran Premio de Italia": ["giuseppe farina","juan manuel fangio","luigi fagioli","reg parnell","louis rosier","alberto ascari","philippe etancelin","peter whitehead","louis chiron","raymond sommer"]
+    }, 
     1951: {
-        "Gran Premio de Gran Bretaña":  ["jose froilan gonzalez","juan manuel fangio","luigi villoresi","piero taruffi","felice bonetto","reg parnell","bob gerard","juan manuel fangio","alberto ascari","stirling moss"],
-        "Gran Premio de España":        ["juan manuel fangio","jose froilan gonzalez","giuseppe farina","alberto ascari","luigi villoresi","juan manuel fangio","piero taruffi","luigi fagioli","roberto mieres","emmanuel de graffenried"],
+        "Gran Premio de Suiza": ["juan manuel fangio","giuseppe farina","luigi villoresi","piero taruffi","alberto ascari","felice bonetto","robert manzon","maurice trintignant","reg parnell","peter whitehead"],
+        "Gran Premio de Indianápolis": ["lee wallard","bill holland","fred agabashian","troy ruttman","duane carter","johnnie parsons","jim rathmann","paul russo","sam hanks","jack mclaughlin"],
+        "Gran Premio de Bélgica": ["giuseppe farina","juan manuel fangio","luigi villoresi","alberto ascari","felice bonetto","robert manzon","maurice trintignant","reg parnell","peter whitehead","roger laurent"],
+        "Gran Premio de Francia": ["juan manuel fangio","luigi villoresi","alberto ascari","giuseppe farina","felice bonetto","robert manzon","maurice trintignant","reg parnell","peter whitehead","roger laurent"],
+        "Gran Premio de Gran Bretaña": ["jose froilan gonzalez","juan manuel fangio","luigi villoresi","giuseppe farina","alberto ascari","felice bonetto","robert manzon","maurice trintignant","reg parnell","peter whitehead"],
+        "Gran Premio de Alemania": ["alberto ascari","juan manuel fangio","giuseppe farina","luigi villoresi","felice bonetto","robert manzon","maurice trintignant","reg parnell","peter whitehead","roger laurent"],
+        "Gran Premio de Italia": ["alberto ascari","juan manuel fangio","giuseppe farina","luigi villoresi","felice bonetto","robert manzon","maurice trintignant","reg parnell","peter whitehead","roger laurent"],
+        "Gran Premio de España": ["juan manuel fangio","alberto ascari","giuseppe farina","luigi villoresi","felice bonetto","robert manzon","maurice trintignant","reg parnell","peter whitehead","roger laurent"]
+
     },
     1952: {
-        "Gran Premio de Gran Bretaña":  ["alberto ascari","piero taruffi","jose froilan gonzalez","mike hawthorn","dennis poore","eric thompson","giuseppe farina","robert manzon","jean behra","alan brown"],
-        "Gran Premio de Italia":        ["alberto ascari","jose froilan gonzalez","luigi villoresi","giuseppe farina","mike hawthorn","piero taruffi","alan brown","eric thompson","jim mayers","peter whitehead"],
+        "Gran Premio de Suiza": ["piero taruffi","rudi fischer","jean behra","roger laurent","peter whitehead","ken wharton","alan brown","eric brandon","rudolf schoeller","toni ulmen"],
+        "Gran Premio de Indianápolis": ["troy ruttman","jim rathmann","sam hanks","bill vukovich","paul russo","duane carter","johnnie parsons","jimmy davies","eddie sack","bob sweikert"],
+        "Gran Premio de Bélgica": ["alberto ascari","giuseppe farina","roberto mires","jean behra","roger laurent","ken wharton","peter whitehead","alan brown","eric brandon","rudolf schoeller"],
+        "Gran Premio de Francia": ["alberto ascari","giuseppe farina","piero taruffi","roberto mires","jean behra","roger laurent","ken wharton","peter whitehead","alan brown","eric brandon"],
+        "Gran Premio de Gran Bretaña": ["alberto ascari","giuseppe farina","piero taruffi","roberto mires","jean behra","roger laurent","ken wharton","peter whitehead","alan brown","eric brandon"],
+        "Gran Premio de Alemania": ["alberto ascari","giuseppe farina","roberto mires","piero taruffi","jean behra","roger laurent","ken wharton","peter whitehead","alan brown","eric brandon"],
+        "Gran Premio de Países Bajos": ["alberto ascari","giuseppe farina","piero taruffi","roberto mires","jean behra","roger laurent","ken wharton","peter whitehead","alan brown","eric brandon"],
+        "Gran Premio de Italia": ["alberto ascari","giuseppe farina","piero taruffi","roberto mires","jean behra","roger laurent","ken wharton","peter whitehead","alan brown","eric brandon"]
     },
     1953: {
-        "Gran Premio de Argentina":     ["alberto ascari","luigi villoresi","jose froilan gonzalez","mike hawthorn","oscar galvez","frolian gonzalez","juan manuel fangio","piero taruffi","giuseppe farina","nino farina"],
-        "Gran Premio de Gran Bretaña":  ["alberto ascari","juan manuel fangio","jose froilan gonzalez","mike hawthorn","giuseppe farina","luigi villoresi","piero taruffi","stirling moss","reg parnell","sergio mantovani"],
+        "Gran Premio de Argentina": ["alberto ascari","luigi villoresi","jose froilan gonzalez","giuseppe farina","juan manuel fangio","roberto mires","onofre marimon","maurice trintignant","felice bonetto","roberto bonomi"],
+        "Gran Premio de Países Bajos": ["alberto ascari","giuseppe farina","luigi villoresi","juan manuel fangio","roberto mires","maurice trintignant","felice bonetto","onofre marimon","peter whitehead","ken wharton"],
+        "Gran Premio de Bélgica": ["alberto ascari","giuseppe farina","juan manuel fangio","luigi villoresi","maurice trintignant","felice bonetto","onofre marimon","peter whitehead","ken wharton","johnny claes"],
+        "Gran Premio de Francia": ["mike hawthorn","juan manuel fangio","alberto ascari","giuseppe farina","luigi villoresi","maurice trintignant","felice bonetto","onofre marimon","peter whitehead","ken wharton"],
+        "Gran Premio de Gran Bretaña": ["alberto ascari","juan manuel fangio","giuseppe farina","luigi villoresi","maurice trintignant","felice bonetto","onofre marimon","peter whitehead","ken wharton","reg parnell"],
+        "Gran Premio de Alemania": ["alberto ascari","giuseppe farina","juan manuel fangio","maurice trintignant","felice bonetto","onofre marimon","peter whitehead","ken wharton","reg parnell","roger laurent"],
+        "Gran Premio de Suiza": ["alberto ascari","juan manuel fangio","giuseppe farina","luigi villoresi","maurice trintignant","felice bonetto","onofre marimon","peter whitehead","ken wharton","roger laurent"],
+        "Gran Premio de Italia": ["juan manuel fangio","alberto ascari","giuseppe farina","luigi villoresi","maurice trintignant","felice bonetto","onofre marimon","peter whitehead","ken wharton","roger laurent"]
     },
-    # ── Años 60 ───────────────────────────────────────────────────
+    1954: {
+        "Gran Premio de Argentina": ["juan manuel fangio","giuseppe farina","jose froilan gonzalez","onofre marimon","nino farina","harry schell","roberto mieres","sergio mantovani","carlos menditeguy","jose froilan gonzalez"],
+        "Gran Premio de Bélgica": ["juan manuel fangio","jose froilan gonzalez","mike hawthorn","jose froilan gonzalez","jean behra","trintignant","nino farina","stirling moss","onofre marimon","roberto mieres"],
+        "Gran Premio de Francia": ["juan manuel fangio","karl kling","robert manzon","onofre marimon","jean behra","stirling moss","nino farina","jose froilan gonzalez","trintignant","roberto mieres"],
+        "Gran Premio de Gran Bretaña": ["jose froilan gonzalez","mike hawthorn","onofre marimon","juan manuel fangio","nino farina","stirling moss","roberto mieres","trintignant","jean behra","harry schell"],
+        "Gran Premio de Alemania": ["juan manuel fangio","jose froilan gonzalez","hans herrmann","karl kling","mike hawthorn","nino farina","trintignant","stirling moss","onofre marimon","roberto mieres"],
+        "Gran Premio de Suiza": ["juan manuel fangio","jose froilan gonzalez","hans herrmann","karl kling","roberto mieres","stirling moss","nino farina","trintignant","jean behra","mike hawthorn"],
+        "Gran Premio de Italia": ["juan manuel fangio","mike hawthorn","jose froilan gonzalez","nino farina","karl kling","hans herrmann","stirling moss","roberto mieres","trintignant","jean behra"],
+        "Gran Premio de España": ["mike hawthorn","luigi musso","juan manuel fangio","roberto mieres","trintignant","juan manuel fangio","jose froilan gonzalez","stirling moss","nino farina","jean behra"],
+    },
+    1955: {
+        "Gran Premio de Argentina": ["juan manuel fangio","jose froilan gonzalez","giuseppe farina","nino farina","trintignant","stirling moss","roberto mieres","jean behra","carlos menditeguy","harry schell"],
+        "Gran Premio de Mónaco": ["trintignant","eugenio castellotti","cesare perdisa","jean behra","stirling moss","luigi villoresi","louis chiron","andre simon","juan manuel fangio","harry schell"],
+        "Gran Premio de Bélgica": ["juan manuel fangio","stirling moss","giuseppe farina","paul frere","roberto mieres","jean behra","eugenio castellotti","andre simon","harry schell","carlos menditeguy"],
+        "Gran Premio de los Países Bajos": ["juan manuel fangio","stirling moss","luigi musso","roberto mieres","jean behra","eugenio castellotti","harry schell","nino farina","andre simon","carlos menditeguy"],
+        "Gran Premio de Gran Bretaña": ["stirling moss","juan manuel fangio","karl kling","piero taruffi","eugenio castellotti","mike hawthorn","luigi musso","roberto mieres","jean behra","harry schell"],
+        "Gran Premio de Italia": ["juan manuel fangio","piero taruffi","eugenio castellotti","nino farina","roberto mieres","jean behra","luigi musso","cesare perdisa","stirling moss","harry schell"],
+    },
+    1956: {
+        "Gran Premio de Argentina": ["juan manuel fangio","luigi musso","jean behra","nino farina","eugenio castellotti","jose froilan gonzalez","cesare perdisa","stirling moss","harry schell","roberto mieres"],
+        "Gran Premio de Mónaco": ["stirling moss","peter collins","jean behra","juan manuel fangio","eugenio castellotti","cesare perdisa","nino farina","harry schell","roberto mieres","luigi musso"],
+        "Gran Premio de Bélgica": ["peter collins","paul frere","cesare perdisa","stirling moss","jean behra","nino farina","eugenio castellotti","juan manuel fangio","harry schell","roberto mieres"],
+        "Gran Premio de Francia": ["peter collins","eugenio castellotti","stirling moss","jean behra","nino farina","juan manuel fangio","harry schell","roberto mieres","cesare perdisa","luigi musso"],
+        "Gran Premio de Gran Bretaña": ["juan manuel fangio","stirling moss","peter collins","jean behra","jack brabham","nino farina","eugenio castellotti","harry schell","cesare perdisa","roberto mieres"],
+        "Gran Premio de Alemania": ["juan manuel fangio","stirling moss","peter collins","eugenio castellotti","jean behra","nino farina","jack brabham","harry schell","roberto mieres","cesare perdisa"],
+        "Gran Premio de Italia": ["stirling moss","peter collins","ron flockhart","eugenio castellotti","juan manuel fangio","jean behra","nino farina","jack brabham","harry schell","cesare perdisa"],
+    },
+    1957: {
+        "Gran Premio de Argentina": ["juan manuel fangio","jean behra","carlos menditeguy","harry schell","cesare perdisa","jack brabham","stirling moss","peter collins","mike hawthorn","luigi musso"],
+        "Gran Premio de Mónaco": ["juan manuel fangio","tony brooks","masten gregory","stirling moss","peter collins","jack brabham","mike hawthorn","jean behra","harry schell","carlos menditeguy"],
+        "Gran Premio de Francia": ["juan manuel fangio","luigi musso","peter collins","mike hawthorn","jean behra","stirling moss","jack brabham","harry schell","carlos menditeguy","cesare perdisa"],
+        "Gran Premio de Gran Bretaña": ["stirling moss","tony brooks","jean behra","luigi musso","peter collins","mike hawthorn","jack brabham","harry schell","carlos menditeguy","juan manuel fangio"],
+        "Gran Premio de Alemania": ["juan manuel fangio","mike hawthorn","peter collins","luigi musso","stirling moss","jean behra","jack brabham","harry schell","carlos menditeguy","cesare perdisa"],
+        "Gran Premio de Pescara": ["stirling moss","juan manuel fangio","harry schell","luigi musso","peter collins","jack brabham","mike hawthorn","jean behra","carlos menditeguy","cesare perdisa"],
+        "Gran Premio de Italia": ["stirling moss","juan manuel fangio","peter collins","mike hawthorn","luigi musso","jack brabham","jean behra","harry schell","carlos menditeguy","cesare perdisa"],
+    },
+    1958: {
+        "Gran Premio de Argentina": ["stirling moss","luigi musso","mike hawthorn","juan manuel fangio","peter collins","jean behra","harry schell","cliff allison","jack brabham","roy salvadori"],
+        "Gran Premio de Mónaco": ["trintignant","luigi musso","stirling moss","peter collins","jean behra","jack brabham","mike hawthorn","harry schell","cliff allison","roy salvadori"],
+        "Gran Premio de los Países Bajos": ["stirling moss","harry schell","jean behra","ron flockhart","cliff allison","mike hawthorn","luigi musso","jack brabham","peter collins","roy salvadori"],
+        "Gran Premio de Bélgica": ["tony brooks","mike hawthorn","stuart lewis evans","cliff allison","harry schell","luigi musso","stirling moss","jean behra","jack brabham","peter collins"],
+        "Gran Premio de Francia": ["mike hawthorn","stirling moss","peter collins","luigi musso","tony brooks","jean behra","harry schell","cliff allison","jack brabham","roy salvadori"],
+        "Gran Premio de Gran Bretaña": ["peter collins","mike hawthorn","roy salvadori","stirling moss","luigi musso","harry schell","jean behra","tony brooks","cliff allison","jack brabham"],
+        "Gran Premio de Alemania": ["tony brooks","roy salvadori","stirling moss","mike hawthorn","peter collins","harry schell","jean behra","cliff allison","jack brabham","luigi musso"],
+        "Gran Premio de Portugal": ["stirling moss","mike hawthorn","luigi musso","jean behra","peter collins","tony brooks","harry schell","cliff allison","jack brabham","roy salvadori"],
+        "Gran Premio de Italia": ["tony brooks","mike hawthorn","phil hill","stirling moss","luigi musso","harry schell","jean behra","jack brabham","cliff allison","roy salvadori"],
+        "Gran Premio de Marruecos": ["stirling moss","mike hawthorn","phil hill","jo bonnier","tony brooks","harry schell","jean behra","cliff allison","jack brabham","roy salvadori"],
+    },
+    1959: {
+        "Gran Premio de Mónaco": ["jack brabham","tony brooks","masten gregory","phil hill","stirling moss","bruce mclaren","jo bonnier","harry schell","cliff allison","roy salvadori"],
+        "Gran Premio de Indianapolis": ["rodger ward","jim rathmann","johnny thomson","tony bettenhausen","paul goldsmith","johnny boyd","eddie johnson","jim mcwitthy","troy ruttman","jim hurtubise"],
+        "Gran Premio de Francia": ["tony brooks","phil hill","jack brabham","olivier gendebien","bruce mclaren","masten gregory","jo bonnier","stirling moss","harry schell","cliff allison"],
+        "Gran Premio de Gran Bretaña": ["jack brabham","stirling moss","bruce mclaren","masten gregory","tony brooks","phil hill","jo bonnier","harry schell","cliff allison","roy salvadori"],
+        "Gran Premio de Alemania": ["tony brooks","jack brabham","masten gregory","stirling moss","bruce mclaren","jo bonnier","phil hill","harry schell","cliff allison","roy salvadori"],
+        "Gran Premio de Portugal": ["stirling moss","masten gregory","jack brabham","tony brooks","masten gregory","jo bonnier","bruce mclaren","phil hill","harry schell","cliff allison"],
+        "Gran Premio de Italia": ["stirling moss","phil hill","jack brabham","tony brooks","masten gregory","jo bonnier","bruce mclaren","harry schell","cliff allison","roy salvadori"],
+        "Gran Premio de Estados Unidos": ["bruce mclaren","trintignant","tony brooks","jack brabham","stirling moss","jo bonnier","masten gregory","phil hill","harry schell","cliff allison"],
+    },
+    1960: {
+        "Gran Premio de Argentina": ["bruce mclaren","cliff allison","stirling moss","innes ireland","trintignant","jo bonnier","jack brabham","phil hill","harry schell","tony brooks"],
+        "Gran Premio de Mónaco": ["stirling moss","tony brooks","bruce mclaren","phil hill","jo bonnier","richie ginther","jack brabham","innes ireland","cliff allison","harry schell"],
+        "Gran Premio de Indianapolis": ["jim rathmann","rodger ward","paul goldsmith","lloyd ruby","jim hurtubise","johnny thomson","tony bettenhausen","eddie sachs","don branson","jimmy daywalt"],
+        "Gran Premio de los Países Bajos": ["jack brabham","innes ireland","stirling moss","phil hill","jo bonnier","bruce mclaren","cliff allison","tony brooks","henry taylor","jim clark"],
+        "Gran Premio de Bélgica": ["jack brabham","bruce mclaren","stirling moss","innes ireland","phil hill","jo bonnier","chris bristow","michael taylor","cliff allison","tony brooks"],
+        "Gran Premio de Francia": ["jack brabham","olivier gendebien","bruce mclaren","henry taylor","innes ireland","jim clark","phil hill","jo bonnier","stirling moss","cliff allison"],
+        "Gran Premio de Gran Bretaña": ["jack brabham","john surtees","innes ireland","bruce mclaren","tony brooks","jim clark","phil hill","jo bonnier","stirling moss","cliff allison"],
+        "Gran Premio de Portugal": ["jack brabham","bruce mclaren","jim clark","innes ireland","tony brooks","phil hill","jo bonnier","stirling moss","cliff allison","henry taylor"],
+        "Gran Premio de Italia": ["phil hill","richie ginther","willy mairesse","bruce mclaren","phil hill","jim clark","innes ireland","jo bonnier","jack brabham","stirling moss"],
+        "Gran Premio de Estados Unidos": ["stirling moss","innes ireland","bruce mclaren","jack brabham","jim clark","phil hill","jo bonnier","tony brooks","cliff allison","henry taylor"],
+    },
     1961: {
-        "Gran Premio de Mónaco":        ["stirling moss","richie ginther","phil hill","dan gurney","bruce mclaren","graham hill","innes ireland","jim clark","tony brooks","jo bonnier"],
-        "Gran Premio de Italia":        ["phil hill","dan gurney","richie ginther","giancarlo baghetti","innes ireland","jack brabham","bruce mclaren","graham hill","jo bonnier","ron flockhart"],
+        "Gran Premio de Mónaco": ["stirling moss","richie ginther","phil hill","dan gurney","bruce mclaren","graham hill","gino munaron","jo bonnier","tony brooks","henry taylor"],
+        "Gran Premio de los Países Bajos": ["von trips","phil hill","jim clark","stirling moss","richie ginther","innes ireland","dan gurney","henry taylor","jo bonnier","bruce mclaren"],
+        "Gran Premio de Bélgica": ["phil hill","von trips","richie ginther","olivier gendebien","john surtees","willy mairesse","bruce mclaren","jim clark","innes ireland","jo bonnier"],
+        "Gran Premio de Francia": ["giancarlo baghetti","dan gurney","phil hill","von trips","richie ginther","innes ireland","jim clark","bruce mclaren","jo bonnier","ron flockhart"],
+        "Gran Premio de Gran Bretaña": ["von trips","phil hill","richie ginther","dan gurney","tony brooks","bruce mclaren","jim clark","innes ireland","jo bonnier","ron flockhart"],
+        "Gran Premio de Alemania": ["stirling moss","von trips","phil hill","richie ginther","jim clark","john surtees","innes ireland","bruce mclaren","jo bonnier","dan gurney"],
+        "Gran Premio de Italia": ["phil hill","dan gurney","richie ginther","innes ireland","bruce mclaren","jim clark","tony brooks","jo bonnier","ron flockhart","willy mairesse"],
+        "Gran Premio de Estados Unidos": ["innes ireland","dan gurney","tony brooks","john surtees","jo bonnier","bruce mclaren","ronnie bucknum","jim hall","jack brabham","stirling moss"],
+    },
+    1962: {
+        "Gran Premio de los Países Bajos": ["graham hill","trevor taylor","phil hill","john surtees","tony maggs","carel godin de beaufort","jack brabham","stirling moss","bruce mclaren","jim clark"],
+        "Gran Premio de Mónaco": ["bruce mclaren","phil hill","jack brabham","john surtees","tony maggs","graham hill","jim clark","richie ginther","innes ireland","trevor taylor"],
+        "Gran Premio de Bélgica": ["jim clark","graham hill","phil hill","john surtees","tony maggs","richie ginther","jack brabham","bruce mclaren","trevor taylor","innes ireland"],
+        "Gran Premio de Francia": ["dan gurney","tony maggs","richie ginther","jim clark","jack brabham","graham hill","phil hill","john surtees","bruce mclaren","trevor taylor"],
+        "Gran Premio de Gran Bretaña": ["jim clark","john surtees","bruce mclaren","jack brabham","tony maggs","graham hill","richie ginther","trevor taylor","phil hill","innes ireland"],
+        "Gran Premio de Alemania": ["graham hill","john surtees","dan gurney","bruce mclaren","jim clark","tony maggs","richie ginther","phil hill","jack brabham","trevor taylor"],
+        "Gran Premio de Italia": ["graham hill","richie ginther","bruce mclaren","john surtees","dan gurney","tony maggs","jack brabham","jim clark","trevor taylor","innes ireland"],
+        "Gran Premio de Estados Unidos": ["jim clark","graham hill","bruce mclaren","john surtees","tony maggs","richie ginther","jack brabham","dan gurney","innes ireland","trevor taylor"],
+        "Gran Premio de Sudáfrica": ["graham hill","bruce mclaren","tony maggs","jack brabham","richie ginther","jim clark","john surtees","innes ireland","trevor taylor","dan gurney"],
     },
     1963: {
-        "Gran Premio de Mónaco":        ["graham hill","richie ginther","bruce mclaren","jack brabham","innes ireland","tony maggs","trevor taylor","jo bonnier","carel godin de beaufort","masten gregory"],
-        "Gran Premio de Italia":        ["jim clark","richie ginther","bruce mclaren","innes ireland","jack brabham","graham hill","jo siffert","tony maggs","jo bonnier","mike spence"],
+        "Gran Premio de Mónaco": ["graham hill","richie ginther","bruce mclaren","john surtees","jim clark","tony maggs","jack brabham","innes ireland","trevor taylor","dan gurney"],
+        "Gran Premio de Bélgica": ["jim clark","bruce mclaren","dan gurney","richie ginther","graham hill","jack brabham","tony maggs","john surtees","trevor taylor","innes ireland"],
+        "Gran Premio de los Países Bajos": ["jim clark","dan gurney","john surtees","richie ginther","graham hill","bruce mclaren","tony maggs","jack brabham","trevor taylor","innes ireland"],
+        "Gran Premio de Francia": ["jim clark","tony maggs","graham hill","jack brabham","richie ginther","dan gurney","john surtees","bruce mclaren","trevor taylor","innes ireland"],
+        "Gran Premio de Gran Bretaña": ["jim clark","john surtees","graham hill","richie ginther","dan gurney","tony maggs","jack brabham","bruce mclaren","trevor taylor","innes ireland"],
+        "Gran Premio de Alemania": ["john surtees","jim clark","richie ginther","graham hill","dan gurney","tony maggs","jack brabham","bruce mclaren","trevor taylor","innes ireland"],
+        "Gran Premio de Italia": ["jim clark","richie ginther","bruce mclaren","graham hill","john surtees","dan gurney","tony maggs","jack brabham","trevor taylor","innes ireland"],
+        "Gran Premio de Estados Unidos": ["graham hill","richie ginther","jim clark","dan gurney","jack brabham","tony maggs","bruce mclaren","trevor taylor","john surtees","innes ireland"],
+        "Gran Premio de México": ["jim clark","jack brabham","richie ginther","innes ireland","graham hill","dan gurney","john surtees","bruce mclaren","tony maggs","trevor taylor"],
+        "Gran Premio de Sudáfrica": ["jim clark","dan gurney","graham hill","tony maggs","john surtees","richie ginther","jack brabham","bruce mclaren","trevor taylor","innes ireland"],
+    },
+    1964: {
+        "Gran Premio de Mónaco": ["graham hill","richie ginther","peter arundell","jack brabham","jim clark","bruce mclaren","dan gurney","john surtees","mike spence","tony maggs"],
+        "Gran Premio de los Países Bajos": ["jim clark","john surtees","peter arundell","richie ginther","bruce mclaren","graham hill","dan gurney","jack brabham","tony maggs","mike spence"],
+        "Gran Premio de Bélgica": ["jim clark","bruce mclaren","jack brabham","richie ginther","graham hill","peter arundell","john surtees","dan gurney","tony maggs","mike spence"],
+        "Gran Premio de Francia": ["dan gurney","graham hill","jack brabham","richie ginther","jim clark","peter arundell","john surtees","bruce mclaren","tony maggs","mike spence"],
+        "Gran Premio de Gran Bretaña": ["jim clark","graham hill","john surtees","jack brabham","dan gurney","richie ginther","peter arundell","bruce mclaren","tony maggs","mike spence"],
+        "Gran Premio de Alemania": ["john surtees","graham hill","lorenzo bandini","jim clark","richie ginther","jack brabham","dan gurney","bruce mclaren","tony maggs","mike spence"],
+        "Gran Premio de Austria": ["lorenzo bandini","richie ginther","bob anderson","tony maggs","jack brabham","dan gurney","jim clark","graham hill","john surtees","bruce mclaren"],
+        "Gran Premio de Italia": ["john surtees","bruce mclaren","lorenzo bandini","richie ginther","jim clark","dan gurney","graham hill","jack brabham","tony maggs","mike spence"],
+        "Gran Premio de Estados Unidos": ["graham hill","john surtees","jim clark","lorenzo bandini","richie ginther","dan gurney","jack brabham","bruce mclaren","tony maggs","mike spence"],
+        "Gran Premio de México": ["dan gurney","john surtees","lorenzo bandini","mike spence","jack brabham","jim clark","richie ginther","graham hill","bruce mclaren","tony maggs"],
     },
     1965: {
-        "Gran Premio de Mónaco":        ["graham hill","lorenzo bandini","jackie stewart","john surtees","richie ginther","bruce mclaren","bob bondurant","innes ireland","jo siffert","denny hulme"],
-        "Gran Premio de Gran Bretaña":  ["jim clark","john surtees","graham hill","mike spence","jackie stewart","denny hulme","bob bondurant","jackie stewart","richie ginther","innes ireland"],
-        "Gran Premio de Italia":        ["jackie stewart","graham hill","dan gurney","lorenzo bandini","denny hulme","richie ginther","jo siffert","bruce mclaren","jackie stewart","bob bondurant"],
+        "Gran Premio de Sudáfrica": ["jim clark","john surtees","graham hill","mike spence","jack brabham","dan gurney","bruce mclaren","richie ginther","jackie stewart","tony maggs"],
+        "Gran Premio de Mónaco": ["graham hill","lorenzo bandini","jackie stewart","john surtees","mike spence","bruce mclaren","dan gurney","jim clark","richie ginther","jack brabham"],
+        "Gran Premio de Bélgica": ["jim clark","jackie stewart","bruce mclaren","graham hill","richie ginther","john surtees","mike spence","dan gurney","jack brabham","tony maggs"],
+        "Gran Premio de Francia": ["jim clark","jackie stewart","john surtees","dan gurney","mike spence","richie ginther","graham hill","bruce mclaren","jack brabham","tony maggs"],
+        "Gran Premio de Gran Bretaña": ["jim clark","graham hill","john surtees","mike spence","dan gurney","richie ginther","jackie stewart","bruce mclaren","jack brabham","tony maggs"],
+        "Gran Premio de los Países Bajos": ["jim clark","jackie stewart","dan gurney","john surtees","graham hill","richie ginther","mike spence","bruce mclaren","jack brabham","tony maggs"],
+        "Gran Premio de Alemania": ["jim clark","graham hill","dan gurney","john surtees","richie ginther","jackie stewart","bruce mclaren","mike spence","jack brabham","tony maggs"],
+        "Gran Premio de Italia": ["jackie stewart","graham hill","dan gurney","john surtees","richie ginther","jim clark","mike spence","bruce mclaren","jack brabham","tony maggs"],
+        "Gran Premio de Estados Unidos": ["graham hill","dan gurney","john surtees","jackie stewart","jim clark","richie ginther","mike spence","bruce mclaren","jack brabham","tony maggs"],
+        "Gran Premio de México": ["richie ginther","dan gurney","mike spence","jackie stewart","jim clark","john surtees","graham hill","bruce mclaren","jack brabham","tony maggs"],
+    },
+    1966: {
+        "Gran Premio de Mónaco": ["jackie stewart","lorenzo bandini","graham hill","bob bondurant","bruce mclaren","jack brabham","dan gurney","john surtees","richie ginther","mike spence"],
+        "Gran Premio de Bélgica": ["john surtees","jochen rindt","lorenzo bandini","jack brabham","graham hill","joakim bonnier","dan gurney","bruce mclaren","richie ginther","mike spence"],
+        "Gran Premio de Francia": ["jack brabham","mike parkes","denny hulme","jochen rindt","graham hill","jackie stewart","dan gurney","john surtees","bruce mclaren","richie ginther"],
+        "Gran Premio de Gran Bretaña": ["jack brabham","denny hulme","graham hill","jim clark","jochen rindt","bruce mclaren","jackie stewart","dan gurney","john surtees","richie ginther"],
+        "Gran Premio de los Países Bajos": ["jack brabham","graham hill","jim clark","jochen rindt","denny hulme","bruce mclaren","jackie stewart","dan gurney","john surtees","richie ginther"],
+        "Gran Premio de Alemania": ["jack brabham","john surtees","jochen rindt","graham hill","denny hulme","jackie stewart","dan gurney","bruce mclaren","jim clark","richie ginther"],
+        "Gran Premio de Italia": ["ludovico scarfiotti","mike parkes","denny hulme","jochen rindt","jack brabham","graham hill","jackie stewart","dan gurney","bruce mclaren","jim clark"],
+        "Gran Premio de Estados Unidos": ["jim clark","jochen rindt","jack brabham","john surtees","denny hulme","graham hill","jackie stewart","dan gurney","bruce mclaren","richie ginther"],
+        "Gran Premio de México": ["john surtees","jack brabham","denny hulme","jochen rindt","jim clark","graham hill","jackie stewart","dan gurney","bruce mclaren","richie ginther"],
     },
     1967: {
-        "Gran Premio de Mónaco":        ["denny hulme","graham hill","chris amon","pedro rodriguez","mike parkes","bob anderson","ricarda rodriguez","piers courage","bruce mclaren","jo siffert"],
-        "Gran Premio de Gran Bretaña":  ["jim clark","denny hulme","chris amon","jack brabham","pedro rodriguez","graham hill","dan gurney","jo siffert","chris irwin","piers courage"],
-        "Gran Premio de Italia":        ["john surtees","jack brabham","jim clark","jochen rindt","mike spence","dan gurney","jacky ickx","brian redman","chris amon","jo siffert"],
+        "Gran Premio de Sudáfrica": ["pedro rodriguez","john love","john surtees","denny hulme","jack brabham","jim clark","mike spence","jackie stewart","graham hill","dan gurney"],
+        "Gran Premio de Mónaco": ["denny hulme","graham hill","chris amon","dan gurney","jim clark","jack brabham","jo siffert","jackie stewart","john surtees","mike spence"],
+        "Gran Premio de los Países Bajos": ["jim clark","jack brabham","denny hulme","dan gurney","chris amon","jochen rindt","mike spence","graham hill","jackie stewart","jo siffert"],
+        "Gran Premio de Bélgica": ["dan gurney","jim clark","jack brabham","denny hulme","chris amon","graham hill","jackie stewart","jochen rindt","jo siffert","mike spence"],
+        "Gran Premio de Francia": ["jack brabham","denny hulme","dan gurney","jo siffert","jim clark","chris amon","graham hill","jackie stewart","jochen rindt","mike spence"],
+        "Gran Premio de Gran Bretaña": ["jim clark","denny hulme","chris amon","jack brabham","dan gurney","jo siffert","graham hill","jackie stewart","jochen rindt","mike spence"],
+        "Gran Premio de Alemania": ["denny hulme","jack brabham","dan gurney","chris amon","jochen rindt","jim clark","jo siffert","graham hill","jackie stewart","mike spence"],
+        "Gran Premio de Canadá": ["jack brabham","denny hulme","dan gurney","jo siffert","jochen rindt","jim clark","chris amon","graham hill","jackie stewart","mike spence"],
+        "Gran Premio de Italia": ["john surtees","jack brabham","jim clark","jochen rindt","denny hulme","dan gurney","chris amon","jo siffert","graham hill","jackie stewart"],
+        "Gran Premio de Estados Unidos": ["jim clark","graham hill","denny hulme","dan gurney","jo siffert","jochen rindt","jack brabham","chris amon","jackie stewart","mike spence"],
+        "Gran Premio de México": ["jim clark","jack brabham","denny hulme","jochen rindt","dan gurney","jo siffert","chris amon","graham hill","jackie stewart","mike spence"],
     },
     1968: {
-        "Gran Premio de Mónaco":        ["graham hill","richard attwood","lucien bianchi","loouis chiron","jacky ickx","brian redman","dan gurney","chris amon","jo siffert","denny hulme"],
-        "Gran Premio de Gran Bretaña":  ["jo siffert","chris amon","jacky ickx","denny hulme","jack brabham","graham hill","dan gurney","brian redman","piers courage","pete lovely"],
+        "Gran Premio de Sudáfrica": ["jim clark","graham hill","jochen rindt","chris amon","denny hulme","jackie stewart","john surtees","jack brabham","jo siffert","bruce mclaren"],
+        "Gran Premio de España": ["graham hill","denny hulme","brian redman","john surtees","jochen rindt","chris amon","jackie stewart","jack brabham","jo siffert","bruce mclaren"],
+        "Gran Premio de Mónaco": ["graham hill","richard attwood","lucien bianchi","jochen rindt","chris amon","denny hulme","jackie stewart","john surtees","jack brabham","jo siffert"],
+        "Gran Premio de Bélgica": ["bruce mclaren","pedro rodriguez","jackie ickx","jackie stewart","jochen rindt","john surtees","denny hulme","chris amon","jack brabham","jo siffert"],
+        "Gran Premio de los Países Bajos": ["jackie stewart","jean pierre beltoise","pedro rodriguez","jackie ickx","jochen rindt","denny hulme","chris amon","john surtees","jack brabham","jo siffert"],
+        "Gran Premio de Francia": ["jackie ickx","john surtees","jackie stewart","pedro rodriguez","jochen rindt","denny hulme","chris amon","jack brabham","jo siffert","bruce mclaren"],
+        "Gran Premio de Gran Bretaña": ["jo siffert","chris amon","jackie stewart","jackie ickx","jochen rindt","denny hulme","john surtees","jack brabham","bruce mclaren","pedro rodriguez"],
+        "Gran Premio de Alemania": ["jackie stewart","graham hill","jochen rindt","jackie ickx","jack brabham","denny hulme","jo siffert","chris amon","john surtees","pedro rodriguez"],
+        "Gran Premio de Italia": ["denny hulme","johnny servoz gavin","jackie ickx","jochen rindt","jackie stewart","graham hill","jo siffert","chris amon","jack brabham","bruce mclaren"],
+        "Gran Premio de Canadá": ["denny hulme","bruce mclaren","pedro rodriguez","graham hill","jackie stewart","jochen rindt","jackie ickx","jo siffert","chris amon","jack brabham"],
+        "Gran Premio de Estados Unidos": ["jackie stewart","graham hill","john surtees","pedro rodriguez","denny hulme","bruce mclaren","jochen rindt","jackie ickx","jo siffert","chris amon"],
+        "Gran Premio de México": ["graham hill","bruce mclaren","jackie oliver","pedro rodriguez","denny hulme","jackie ickx","jo siffert","chris amon","jack brabham","jackie stewart"],
     },
     1969: {
-        "Gran Premio de Mónaco":        ["graham hill","piers courage","jo siffert","brian redman","denny hulme","richard attwood","vic elford","jacky ickx","bruce mclaren","john surtees"],
-        "Gran Premio de Gran Bretaña":  ["jacky ickx","jack brabham","jochen rindt","bruce mclaren","john surtees","piers courage","vicc elford","graham hill","jo siffert","denny hulme"],
+        "Gran Premio de Sudáfrica": ["jackie stewart","graham hill","denny hulme","jochen rindt","jean pierre beltoise","jo siffert","bruce mclaren","jackie ickx","jack brabham","chris amon"],
+        "Gran Premio de España": ["jackie stewart","bruce mclaren","jean pierre beltoise","denny hulme","jochen rindt","graham hill","jackie ickx","jo siffert","jack brabham","chris amon"],
+        "Gran Premio de Mónaco": ["graham hill","piers courage","jo siffert","jean pierre beltoise","denny hulme","jackie stewart","jochen rindt","bruce mclaren","jackie ickx","jack brabham"],
+        "Gran Premio de los Países Bajos": ["jackie stewart","jo siffert","chris amon","jochen rindt","denny hulme","jean pierre beltoise","jackie ickx","graham hill","jack brabham","bruce mclaren"],
+        "Gran Premio de Francia": ["jackie stewart","francois cevert","jochen rindt","jean pierre beltoise","denny hulme","graham hill","jo siffert","jackie ickx","jack brabham","chris amon"],
+        "Gran Premio de Gran Bretaña": ["jackie stewart","jackie ickx","bruce mclaren","jochen rindt","denny hulme","jean pierre beltoise","graham hill","jo siffert","jack brabham","chris amon"],
+        "Gran Premio de Alemania": ["jackie ickx","jackie stewart","bruce mclaren","jochen rindt","denny hulme","jean pierre beltoise","graham hill","jo siffert","jack brabham","chris amon"],
+        "Gran Premio de Italia": ["jackie stewart","jochen rindt","jean pierre beltoise","bruce mclaren","piers courage","denny hulme","graham hill","jo siffert","jackie ickx","jack brabham"],
+        "Gran Premio de Canadá": ["jackie ickx","jochen rindt","jack brabham","denny hulme","jean pierre beltoise","bruce mclaren","jackie stewart","graham hill","jo siffert","chris amon"],
+        "Gran Premio de Estados Unidos": ["jochen rindt","piers courage","john surtees","peter gethin","jack brabham","jackie stewart","denny hulme","graham hill","jo siffert","jackie ickx"],
+        "Gran Premio de México": ["denny hulme","jackie ickx","jackie stewart","jack brabham","jochen rindt","piers courage","jean pierre beltoise","bruce mclaren","graham hill","jo siffert"],
     },
-    # ── Años 70 ───────────────────────────────────────────────────
     1970: {
-        "Gran Premio de Mónaco":        ["jochen rindt","jack brabham","henri pescarolo","denny hulme","rolf stommelen","pedro rodriguez","jacky ickx","graham hill","amos posey","pete lovely"],
-        "Gran Premio de Italia":        ["clay regazzoni","jacky ickx","denny hulme","rolf stommelen","francois cevert","jochen rindt","graham hill","pedro rodriguez","john miles","andrea de adamich"],
-        "Gran Premio de Austria":       ["jacky ickx","clay regazzoni","denny hulme","rolf stommelen","jochen rindt","emerson fittipaldi","jo siffert","pedro rodriguez","derek bell","graham hill"],
+        "Gran Premio de Sudáfrica": ["jack brabham","denny hulme","jackie stewart","jean pierre beltoise","jochen rindt","john miles","mario andretti","graham hill","jackie ickx","chris amon"],
+        "Gran Premio de España": ["jackie stewart","bruce mclaren","mario andretti","graham hill","jackie ickx","jochen rindt","jean pierre beltoise","denny hulme","jack brabham","emerson fittipaldi"],
+        "Gran Premio de Mónaco": ["jochen rindt","jackie ickx","jean pierre beltoise","henri pescarolo","graham hill","denny hulme","jack brabham","jackie stewart","emerson fittipaldi","rolf stommelen"],
+        "Gran Premio de Bélgica": ["pedro rodriguez","chris amon","ignazio giunti","denny hulme","jean pierre beltoise","jochen rindt","jackie ickx","jackie stewart","emerson fittipaldi","jack brabham"],
+        "Gran Premio de los Países Bajos": ["jochen rindt","jackie ickx","jackie stewart","emerson fittipaldi","clay regazzoni","rolf stommelen","pedro rodriguez","jack brabham","jean pierre beltoise","denny hulme"],
+        "Gran Premio de Francia": ["jochen rindt","clay regazzoni","chris amon","jack brabham","denny hulme","jackie ickx","emerson fittipaldi","jean pierre beltoise","jackie stewart","pedro rodriguez"],
+        "Gran Premio de Gran Bretaña": ["jochen rindt","jack brabham","denny hulme","clay regazzoni","chris amon","rolf stommelen","pedro rodriguez","emerson fittipaldi","jackie ickx","jackie stewart"],
+        "Gran Premio de Alemania": ["jochen rindt","jackie ickx","denny hulme","emerson fittipaldi","rolf stommelen","pedro rodriguez","clay regazzoni","jack brabham","jackie stewart","chris amon"],
+        "Gran Premio de Austria": ["jackie ickx","clay regazzoni","rolf stommelen","pedro rodriguez","emerson fittipaldi","graham hill","denny hulme","jochen rindt","jack brabham","jackie stewart"],
+        "Gran Premio de Italia": ["clay regazzoni","jackie stewart","jean pierre beltoise","denny hulme","rolf stommelen","emerson fittipaldi","pedro rodriguez","jack brabham","jackie ickx","chris amon"],
+        "Gran Premio de Canadá": ["jackie ickx","clay regazzoni","chris amon","peter gethin","emerson fittipaldi","graham hill","denny hulme","john miles","rolf stommelen","jackie stewart"],
+        "Gran Premio de Estados Unidos": ["emerson fittipaldi","pedro rodriguez","reine wisell","jack brabham","denny hulme","clay regazzoni","chris amon","jackie ickx","graham hill","rolf stommelen"],
+        "Gran Premio de México": ["jackie ickx","clay regazzoni","denny hulme","chris amon","pedro rodriguez","emerson fittipaldi","reine wisell","rolf stommelen","graham hill","jack brabham"],
     },
     1971: {
-        "Gran Premio de Mónaco":        ["jackie stewart","ronnie peterson","emerson fittipaldi","jacky ickx","denny hulme","clay regazzoni","mario andretti","graham hill","rolf stommelen","pedro rodriguez"],
-        "Gran Premio de Italia":        ["peter gethin","ronnie peterson","francois cevert","mike hailwood","howden ganley","clay regazzoni","chris amon","jo siffert","rolf stommelen","graham hill"],
+        "Gran Premio de Sudáfrica": ["mario andretti","jackie stewart","clay regazzoni","reine wisell","rolf stommelen","henri pescarolo","graham hill","john surtees","denny hulme","jackie oliver"],
+        "Gran Premio de España": ["jackie stewart","jacky ickx","chris amon","pedro rodriguez","denny hulme","rolf stommelen","jean pierre beltoise","graham hill","reine wisell","peter gethin"],
+        "Gran Premio de Mónaco": ["jackie stewart","ronnie peterson","jacky ickx","reine wisell","denny hulme","chris amon","mark donohue","rolf stommelen","graham hill","pedro rodriguez"],
+        "Gran Premio de Países Bajos": ["jackie stewart","pedro rodriguez","clay regazzoni","jacky ickx","reine wisell","ronnie peterson","denny hulme","chris amon","rolf stommelen","andrea de adamich"],
+        "Gran Premio de Francia": ["jackie stewart","francois cevert","emerson fittipaldi","mike hailwood","clay regazzoni","reine wisell","jacky ickx","peter gethin","rolf stommelen","denny hulme"],
+        "Gran Premio de Gran Bretaña": ["jo siffert","francois cevert","emerson fittipaldi","mike hailwood","graham hill","clay regazzoni","jackie stewart","reine wisell","peter gethin","john surtees"],
+        "Gran Premio de Alemania": ["jackie stewart","francois cevert","clay regazzoni","mario andretti","ronnie peterson","rolf stommelen","howden ganley","tim schenken","reine wisell","pedro rodriguez"],
+        "Gran Premio de Austria": ["jo siffert","emerson fittipaldi","tim schenken","reine wisell","jacky ickx","francois cevert","clay regazzoni","chris amon","denny hulme","andrea de adamich"],
+        "Gran Premio de Italia": ["peter gethin","ronnie peterson","francois cevert","mike hailwood","howden ganley","rolf stommelen","chris amon","clay regazzoni","reine wisell","jacky ickx"],
+        "Gran Premio de Canadá": ["jackie stewart","ronnie peterson","mark donohue","denny hulme","reine wisell","francois cevert","jo siffert","clay regazzoni","peter gethin","chris amon"],
+        "Gran Premio de Estados Unidos": ["francois cevert","jo siffert","ronnie peterson","emerson fittipaldi","reine wisell","jackie stewart","clay regazzoni","mark donohue","howden ganley","denny hulme"],
+    },
+    1972: {
+        "Gran Premio de Argentina": ["jackie stewart","denny hulme","jacky ickx","ronnie peterson","emerson fittipaldi","clay regazzoni","carlos reutemann","howden ganley","tim schenken","peter revson"],
+        "Gran Premio de Sudáfrica": ["denny hulme","emerson fittipaldi","peter revson","mario andretti","jacky ickx","mike hailwood","ronnie peterson","clay regazzoni","tim schenken","howden ganley"],
+        "Gran Premio de España": ["emerson fittipaldi","jacky ickx","clay regazzoni","andrea de adamich","carlos reutemann","ronnie peterson","peter revson","denny hulme","jackie stewart","rolf stommelen"],
+        "Gran Premio de Mónaco": ["jean pierre beltoise","jacky ickx","emerson fittipaldi","jackie stewart","brian redman","chris amon","carlos reutemann","ronnie peterson","denny hulme","tim schenken"],
+        "Gran Premio de Bélgica": ["emerson fittipaldi","francois cevert","denny hulme","mike hailwood","jacky ickx","clay regazzoni","jackie stewart","carlos reutemann","ronnie peterson","howden ganley"],
+        "Gran Premio de Francia": ["jackie stewart","emerson fittipaldi","chris amon","francois cevert","reine wisell","denny hulme","jacky ickx","clay regazzoni","howden ganley","carlos reutemann"],
+        "Gran Premio de Gran Bretaña": ["emerson fittipaldi","jackie stewart","peter revson","chris amon","denny hulme","carlos reutemann","francois cevert","clay regazzoni","ronnie peterson","mike hailwood"],
+        "Gran Premio de Alemania": ["jacky ickx","clay regazzoni","ronnie peterson","denny hulme","jackie stewart","emerson fittipaldi","carlos reutemann","francois cevert","peter revson","rolf stommelen"],
+        "Gran Premio de Austria": ["emerson fittipaldi","denny hulme","peter revson","carlos reutemann","clay regazzoni","jacky ickx","ronnie peterson","jackie stewart","francois cevert","howden ganley"],
+        "Gran Premio de Italia": ["emerson fittipaldi","mike hailwood","denny hulme","peter revson","ronnie peterson","jacky ickx","jackie stewart","carlos reutemann","clay regazzoni","francois cevert"],
+        "Gran Premio de Canadá": ["jackie stewart","peter revson","denny hulme","jacky ickx","emerson fittipaldi","clay regazzoni","francois cevert","carlos reutemann","ronnie peterson","mike hailwood"],
+        "Gran Premio de Estados Unidos": ["jackie stewart","francois cevert","denny hulme","ronnie peterson","jacky ickx","emerson fittipaldi","peter revson","clay regazzoni","carlos reutemann","mike hailwood"],
     },
     1973: {
-        "Gran Premio de Mónaco":        ["jackie stewart","emerson fittipaldi","ronnie peterson","francois cevert","denny hulme","mike hailwood","carlos reutemann","jean-pierre beltoise","peter revson","clay regazzoni"],
-        "Gran Premio de Gran Bretaña":  ["peter revson","ronnie peterson","denny hulme","james hunt","jackie oliver","carlos reutemann","jackie stewart","andrea de cesaris","jody scheckter","arturo merzario"],
-        "Gran Premio de Italia":        ["ronnie peterson","emerson fittipaldi","peter revson","jackie stewart","francois cevert","carlos reutemann","denny hulme","jody scheckter","arturo merzario","andrea de cesaris"],
+        "Gran Premio de Argentina": ["emerson fittipaldi","francois cevert","denny hulme","jackie stewart","ronnie peterson","carlos reutemann","jacky ickx","clay regazzoni","carlos pace","arturo merzario"],
+        "Gran Premio de Brasil": ["emerson fittipaldi","jacky ickx","denny hulme","jackie stewart","francois cevert","peter revson","ronnie peterson","carlos reutemann","clay regazzoni","carlos pace"],
+        "Gran Premio de Sudáfrica": ["jackie stewart","peter revson","emerson fittipaldi","jacky ickx","francois cevert","denny hulme","ronnie peterson","clay regazzoni","carlos reutemann","mike hailwood"],
+        "Gran Premio de España": ["emerson fittipaldi","francois cevert","george follmer","jacky ickx","jean pierre beltoise","denny hulme","jackie stewart","carlos reutemann","carlos pace","arturo merzario"],
+        "Gran Premio de Bélgica": ["francois cevert","emerson fittipaldi","jacky ickx","denny hulme","jackie stewart","ronnie peterson","carlos reutemann","clay regazzoni","niki lauda","carlos pace"],
+        "Gran Premio de Mónaco": ["jacky ickx","emerson fittipaldi","ronnie peterson","jackie stewart","francois cevert","carlos reutemann","denny hulme","niki lauda","clay regazzoni","jean pierre beltoise"],
+        "Gran Premio de Suecia": ["denny hulme","ronnie peterson","francois cevert","jacky ickx","emerson fittipaldi","jackie stewart","carlos reutemann","clay regazzoni","niki lauda","jean pierre beltoise"],
+        "Gran Premio de Francia": ["ronnie peterson","francois cevert","carlos reutemann","emerson fittipaldi","jacky ickx","denny hulme","jackie stewart","clay regazzoni","niki lauda","jean pierre beltoise"],
+        "Gran Premio de Gran Bretaña": ["peter revson","ronnie peterson","denny hulme","emerson fittipaldi","jackie stewart","francois cevert","jacky ickx","carlos reutemann","clay regazzoni","niki lauda"],
+        "Gran Premio de Países Bajos": ["jackie stewart","ronnie peterson","francois cevert","jacky ickx","emerson fittipaldi","denny hulme","carlos reutemann","clay regazzoni","niki lauda","jean pierre beltoise"],
+        "Gran Premio de Alemania": ["jacky ickx","jackie stewart","ronnie peterson","francois cevert","carlos reutemann","emerson fittipaldi","denny hulme","clay regazzoni","niki lauda","andrea de adamich"],
+        "Gran Premio de Austria": ["ronnie peterson","emerson fittipaldi","carlos reutemann","denny hulme","jacky ickx","jackie stewart","francois cevert","clay regazzoni","niki lauda","jean pierre beltoise"],
+        "Gran Premio de Italia": ["ronnie peterson","emerson fittipaldi","peter revson","jacky ickx","francois cevert","denny hulme","jackie stewart","carlos reutemann","clay regazzoni","niki lauda"],
+        "Gran Premio de Canadá": ["peter revson","emerson fittipaldi","jacky ickx","jackie stewart","denny hulme","ronnie peterson","carlos reutemann","clay regazzoni","niki lauda","jean pierre beltoise"],
+        "Gran Premio de Estados Unidos": ["ronnie peterson","jacky ickx","denny hulme","emerson fittipaldi","carlos reutemann","jackie stewart","francois cevert","clay regazzoni","niki lauda","jean pierre beltoise"],
+    },
+    1974: {
+        "Gran Premio de Argentina": ["denny hulme","niki lauda","clay regazzoni","mike hailwood","emerson fittipaldi","carlos reutemann","jacky ickx","ronnie peterson","jean pierre beltoise","carlos pace"],
+        "Gran Premio de Brasil": ["emerson fittipaldi","clay regazzoni","jacky ickx","niki lauda","denny hulme","carlos reutemann","ronnie peterson","jean pierre beltoise","carlos pace","arturo merzario"],
+        "Gran Premio de Sudáfrica": ["carlos reutemann","jean pierre beltoise","mike hailwood","peter revson","denny hulme","jacky ickx","clay regazzoni","niki lauda","emerson fittipaldi","carlos pace"],
+        "Gran Premio de España": ["niki lauda","clay regazzoni","emerson fittipaldi","hans joachim stuck","jacky ickx","ronnie peterson","denny hulme","carlos reutemann","jean pierre beltoise","carlos pace"],
+        "Gran Premio de Bélgica": ["emerson fittipaldi","niki lauda","jody scheckter","clay regazzoni","denny hulme","carlos reutemann","ronnie peterson","jacky ickx","jean pierre beltoise","carlos pace"],
+        "Gran Premio de Mónaco": ["ronnie peterson","jody scheckter","jean pierre beltoise","clay regazzoni","niki lauda","emerson fittipaldi","denny hulme","carlos reutemann","jacky ickx","carlos pace"],
+        "Gran Premio de Suecia": ["jody scheckter","patrick depailler","james hunt","clay regazzoni","niki lauda","emerson fittipaldi","denny hulme","carlos reutemann","ronnie peterson","jacky ickx"],
+        "Gran Premio de Países Bajos": ["niki lauda","clay regazzoni","emerson fittipaldi","jody scheckter","hans joachim stuck","denny hulme","carlos reutemann","ronnie peterson","jacky ickx","carlos pace"],
+        "Gran Premio de Francia": ["ronnie peterson","niki lauda","emerson fittipaldi","carlos reutemann","denny hulme","clay regazzoni","jody scheckter","jacky ickx","jean pierre beltoise","carlos pace"],
+        "Gran Premio de Gran Bretaña": ["jody scheckter","emerson fittipaldi","jacky ickx","niki lauda","clay regazzoni","denny hulme","ronnie peterson","carlos reutemann","jean pierre beltoise","carlos pace"],
+        "Gran Premio de Alemania": ["clay regazzoni","jody scheckter","jacky ickx","emerson fittipaldi","carlos reutemann","denny hulme","niki lauda","ronnie peterson","jean pierre beltoise","hans joachim stuck"],
+        "Gran Premio de Austria": ["carlos reutemann","denny hulme","niki lauda","james hunt","clay regazzoni","jody scheckter","emerson fittipaldi","ronnie peterson","jacky ickx","jean pierre beltoise"],
+        "Gran Premio de Italia": ["ronnie peterson","emerson fittipaldi","jody scheckter","niki lauda","denny hulme","clay regazzoni","carlos reutemann","jacky ickx","jean pierre beltoise","carlos pace"],
+        "Gran Premio de Canadá": ["emerson fittipaldi","clay regazzoni","denny hulme","niki lauda","jody scheckter","jacky ickx","ronnie peterson","carlos reutemann","jean pierre beltoise","carlos pace"],
+        "Gran Premio de Estados Unidos": ["carlos reutemann","carlos pace","james hunt","emerson fittipaldi","ronnie peterson","niki lauda","clay regazzoni","jody scheckter","denny hulme","jacky ickx"],
     },
     1975: {
-        "Gran Premio de Mónaco":        ["niki lauda","emerson fittipaldi","carlos reutemann","jochen mass","patrick depailler","mike hailwood","vittorio brambilla","jody scheckter","ronnie peterson","clay regazzoni"],
-        "Gran Premio de Gran Bretaña":  ["emerson fittipaldi","carlos reutemann","jody scheckter","jochen mass","patricio depailler","niki lauda","james hunt","clay regazzoni","mario andretti","ronnie peterson"],
-        "Gran Premio de Nürburgring":   ["carlos reutemann","jochen mass","niki lauda","james hunt","patrick depailler","jody scheckter","tony brise","clay regazzoni","ronnie peterson","lella lombardi"],
+        "Gran Premio de Argentina": ["emerson fittipaldi","james hunt","carlos reutemann","clay regazzoni","niki lauda","carlos pace","ronnie peterson","jody scheckter","patrick depailler","denny hulme"],
+        "Gran Premio de Brasil": ["carlos pace","emerson fittipaldi","jochen mass","clay regazzoni","carlos reutemann","niki lauda","ronnie peterson","james hunt","jody scheckter","patrick depailler"],
+        "Gran Premio de Sudáfrica": ["jody scheckter","carlos reutemann","patrick depailler","niki lauda","jochen mass","james hunt","clay regazzoni","emerson fittipaldi","ronnie peterson","carlos pace"],
+        "Gran Premio de España": ["jochen mass","jacky ickx","carlos reutemann","niki lauda","emerson fittipaldi","clay regazzoni","jody scheckter","james hunt","ronnie peterson","patrick depailler"],
+        "Gran Premio de Mónaco": ["niki lauda","emerson fittipaldi","carlos pace","jochen mass","patrick depailler","clay regazzoni","jody scheckter","carlos reutemann","james hunt","ronnie peterson"],
+        "Gran Premio de Bélgica": ["niki lauda","jody scheckter","carlos reutemann","clay regazzoni","emerson fittipaldi","jochen mass","carlos pace","james hunt","ronnie peterson","patrick depailler"],
+        "Gran Premio de Suecia": ["niki lauda","carlos reutemann","clay regazzoni","jochen mass","emerson fittipaldi","ronnie peterson","jody scheckter","james hunt","carlos pace","patrick depailler"],
+        "Gran Premio de Países Bajos": ["james hunt","niki lauda","clay regazzoni","carlos reutemann","ronnie peterson","carlos pace","jody scheckter","jochen mass","emerson fittipaldi","patrick depailler"],
+        "Gran Premio de Francia": ["niki lauda","james hunt","jochen mass","emerson fittipaldi","clay regazzoni","carlos reutemann","jody scheckter","carlos pace","ronnie peterson","patrick depailler"],
+        "Gran Premio de Gran Bretaña": ["emerson fittipaldi","carlos pace","jochen mass","niki lauda","carlos reutemann","jody scheckter","james hunt","clay regazzoni","ronnie peterson","patrick depailler"],
+        "Gran Premio de Alemania": ["carlos reutemann","clay regazzoni","jacques laffite","jochen mass","emerson fittipaldi","jody scheckter","niki lauda","ronnie peterson","james hunt","patrick depailler"],
+        "Gran Premio de Austria": ["vittorio brambilla","james hunt","jochen mass","carlos reutemann","niki lauda","clay regazzoni","emerson fittipaldi","jody scheckter","carlos pace","ronnie peterson"],
+        "Gran Premio de Italia": ["clay regazzoni","emerson fittipaldi","niki lauda","carlos reutemann","james hunt","jochen mass","jody scheckter","carlos pace","ronnie peterson","patrick depailler"],
+        "Gran Premio de Estados Unidos": ["niki lauda","emerson fittipaldi","jochen mass","carlos reutemann","jody scheckter","clay regazzoni","james hunt","carlos pace","ronnie peterson","patrick depailler"],
     },
     1976: {
-        "Gran Premio de Mónaco":        ["niki lauda","jody scheckter","patrick depailler","hans joachim stuck","jochen mass","emerson fittipaldi","clay regazzoni","james hunt","rolf stommelen","jacky ickx"],
-        "Gran Premio de Gran Bretaña":  ["james hunt","niki lauda","jody scheckter","jochen mass","carlos reutemann","hans joachim stuck","tom pryce","alan jones","emerson fittipaldi","ronnie peterson"],
-        "Gran Premio de Japón":         ["mario andretti","jody scheckter","james hunt","patrick depailler","alan jones","gunnar nilsson","clay regazzoni","masahiro hasemi","niki lauda","vittorio brambilla"],
+        "Gran Premio de Brasil": ["niki lauda","patrick depailler","tom pryce","jody scheckter","emerson fittipaldi","jochen mass","james hunt","clay regazzoni","carlos pace","ronnie peterson"],
+        "Gran Premio de Sudáfrica": ["niki lauda","james hunt","jochen mass","jody scheckter","clay regazzoni","emerson fittipaldi","carlos pace","ronnie peterson","patrick depailler","mario andretti"],
+        "Gran Premio de Estados Unidos Oeste": ["clay regazzoni","niki lauda","patrick depailler","james hunt","jochen mass","jody scheckter","emerson fittipaldi","carlos pace","ronnie peterson","mario andretti"],
+        "Gran Premio de España": ["james hunt","niki lauda","gunnar nilsson","carlos reutemann","clay regazzoni","jody scheckter","emerson fittipaldi","jochen mass","ronnie peterson","patrick depailler"],
+        "Gran Premio de Bélgica": ["niki lauda","clay regazzoni","jochen mass","jody scheckter","james hunt","carlos reutemann","emerson fittipaldi","ronnie peterson","patrick depailler","mario andretti"],
+        "Gran Premio de Mónaco": ["niki lauda","jody scheckter","patrick depailler","hans joachim stuck","jochen mass","emerson fittipaldi","carlos pace","clay regazzoni","ronnie peterson","james hunt"],
+        "Gran Premio de Suecia": ["jody scheckter","niki lauda","patrick depailler","jochen mass","emerson fittipaldi","carlos reutemann","james hunt","clay regazzoni","ronnie peterson","mario andretti"],
+        "Gran Premio de Francia": ["james hunt","patrick depailler","jochen mass","niki lauda","clay regazzoni","jody scheckter","emerson fittipaldi","carlos reutemann","ronnie peterson","carlos pace"],
+        "Gran Premio de Gran Bretaña": ["james hunt","niki lauda","jochen mass","gunnar nilsson","jody scheckter","patrick depailler","clay regazzoni","emerson fittipaldi","carlos reutemann","ronnie peterson"],
+        "Gran Premio de Alemania": ["james hunt","jochen mass","carlos reutemann","jody scheckter","gunnar nilsson","niki lauda","clay regazzoni","emerson fittipaldi","ronnie peterson","patrick depailler"],
+        "Gran Premio de Austria": ["john watson","james hunt","gunnar nilsson","ronnie peterson","jody scheckter","niki lauda","jochen mass","carlos reutemann","clay regazzoni","emerson fittipaldi"],
+        "Gran Premio de Países Bajos": ["james hunt","clay regazzoni","niki lauda","ronnie peterson","jody scheckter","gunnar nilsson","jochen mass","carlos reutemann","emerson fittipaldi","patrick depailler"],
+        "Gran Premio de Italia": ["ronnie peterson","clay regazzoni","james hunt","niki lauda","jochen mass","jody scheckter","gunnar nilsson","carlos reutemann","emerson fittipaldi","patrick depailler"],
+        "Gran Premio de Canadá": ["james hunt","patrick depailler","mario andretti","jochen mass","jody scheckter","gunnar nilsson","clay regazzoni","niki lauda","emerson fittipaldi","ronnie peterson"],
+        "Gran Premio de Estados Unidos Este": ["james hunt","jochen mass","niki lauda","ronnie peterson","jody scheckter","gunnar nilsson","carlos reutemann","clay regazzoni","emerson fittipaldi","patrick depailler"],
+        "Gran Premio de Japón": ["mario andretti","jody scheckter","james hunt","patrick depailler","jochen mass","gunnar nilsson","clay regazzoni","niki lauda","ronnie peterson","emerson fittipaldi"],
     },
     1977: {
-        "Gran Premio de Mónaco":        ["jody scheckter","niki lauda","carlos reutemann","jochen mass","mario andretti","gunnar nilsson","john watson","alan jones","rupert keegan","brett lunger"],
-        "Gran Premio de Gran Bretaña":  ["james hunt","niki lauda","gunnar nilsson","jochen mass","alan jones","hans joachim stuck","david purley","patrick depailler","clay regazzoni","jean-pierre jarier"],
+        "Gran Premio de Argentina": ["jody scheckter","carlos pace","mario andretti","emerson fittipaldi","james hunt","jochen mass","niki lauda","patrick depailler","clay regazzoni","gunnar nilsson"],
+        "Gran Premio de Brasil": ["carlos reutemann","james hunt","niki lauda","emerson fittipaldi","jochen mass","jody scheckter","mario andretti","gunnar nilsson","patrick depailler","clay regazzoni"],
+        "Gran Premio de Sudáfrica": ["niki lauda","jody scheckter","patrick depailler","james hunt","jochen mass","john watson","emerson fittipaldi","mario andretti","clay regazzoni","gunnar nilsson"],
+        "Gran Premio de Estados Unidos Oeste": ["mario andretti","niki lauda","james hunt","emerson fittipaldi","jody scheckter","patrick depailler","jochen mass","clay regazzoni","gunnar nilsson","carlos reutemann"],
+        "Gran Premio de España": ["mario andretti","carlos reutemann","james hunt","jochen mass","jody scheckter","emerson fittipaldi","niki lauda","patrick depailler","clay regazzoni","gunnar nilsson"],
+        "Gran Premio de Mónaco": ["jody scheckter","niki lauda","carlos reutemann","james hunt","jochen mass","mario andretti","emerson fittipaldi","patrick depailler","clay regazzoni","gunnar nilsson"],
+        "Gran Premio de Bélgica": ["gunnar nilsson","niki lauda","ronnie peterson","jody scheckter","james hunt","jochen mass","emerson fittipaldi","mario andretti","carlos reutemann","patrick depailler"],
+        "Gran Premio de Suecia": ["james hunt","niki lauda","gunnar nilsson","jochen mass","jody scheckter","emerson fittipaldi","mario andretti","carlos reutemann","patrick depailler","clay regazzoni"],
+        "Gran Premio de Francia": ["mario andretti","john watson","james hunt","niki lauda","ronnie peterson","jochen mass","gunnar nilsson","jody scheckter","emerson fittipaldi","carlos reutemann"],
+        "Gran Premio de Gran Bretaña": ["james hunt","niki lauda","gunnar nilsson","jochen mass","jody scheckter","mario andretti","emerson fittipaldi","carlos reutemann","ronnie peterson","patrick depailler"],
+        "Gran Premio de Alemania": ["niki lauda","jody scheckter","hans joachim stuck","jochen mass","gunnar nilsson","james hunt","emerson fittipaldi","mario andretti","carlos reutemann","patrick depailler"],
+        "Gran Premio de Austria": ["alan jones","niki lauda","gunnar nilsson","jochen mass","jody scheckter","james hunt","emerson fittipaldi","mario andretti","carlos reutemann","ronnie peterson"],
+        "Gran Premio de Países Bajos": ["niki lauda","jody scheckter","gunnar nilsson","jochen mass","james hunt","emerson fittipaldi","mario andretti","carlos reutemann","ronnie peterson","patrick depailler"],
+        "Gran Premio de Italia": ["mario andretti","niki lauda","jody scheckter","jochen mass","gunnar nilsson","james hunt","emerson fittipaldi","carlos reutemann","ronnie peterson","clay regazzoni"],
+        "Gran Premio de Estados Unidos Este": ["james hunt","mario andretti","niki lauda","jochen mass","jody scheckter","gunnar nilsson","emerson fittipaldi","carlos reutemann","ronnie peterson","clay regazzoni"],
+        "Gran Premio de Canadá": ["jody scheckter","patrick depailler","jochen mass","niki lauda","mario andretti","james hunt","gunnar nilsson","emerson fittipaldi","carlos reutemann","ronnie peterson"],
+        "Gran Premio de Japón": ["james hunt","carlos reutemann","mario andretti","jody scheckter","niki lauda","jochen mass","gunnar nilsson","emerson fittipaldi","ronnie peterson","patrick depailler"],
     },
     1978: {
-        "Gran Premio de Mónaco":        ["patrick depailler","niki lauda","jody scheckter","carlos reutemann","mario andretti","jacky ickx","gilles villeneuve","nelson piquet","jo siffert","derek daly"],
-        "Gran Premio de Gran Bretaña":  ["carlos reutemann","niki lauda","john watson","jochen mass","mario andretti","hans joachim stuck","james hunt","alan jones","hector rebaque","derek daly"],
-        "Gran Premio de Italia":        ["mario andretti","gilles villeneuve","ronnie peterson","jody scheckter","niki lauda","john watson","carlos reutemann","derek daly","vittorio brambilla","riccardo patrese"],
+        "Gran Premio de Argentina": ["mario andretti","niki lauda","patrick depailler","james hunt","ronnie peterson","jody scheckter","emerson fittipaldi","carlos reutemann","jochen mass","alan jones"],
+        "Gran Premio de Brasil": ["carlos reutemann","emerson fittipaldi","mario andretti","jody scheckter","niki lauda","ronnie peterson","james hunt","patrick depailler","jochen mass","alan jones"],
+        "Gran Premio de Sudáfrica": ["ronnie peterson","mario andretti","niki lauda","emerson fittipaldi","jody scheckter","carlos reutemann","james hunt","patrick depailler","jochen mass","alan jones"],
+        "Gran Premio de Estados Unidos Oeste": ["carlos reutemann","mario andretti","niki lauda","jody scheckter","emerson fittipaldi","ronnie peterson","james hunt","patrick depailler","jochen mass","alan jones"],
+        "Gran Premio de Mónaco": ["patrick depailler","niki lauda","jody scheckter","carlos reutemann","emerson fittipaldi","mario andretti","ronnie peterson","james hunt","jochen mass","alan jones"],
+        "Gran Premio de Bélgica": ["mario andretti","ronnie peterson","carlos reutemann","niki lauda","emerson fittipaldi","jody scheckter","james hunt","patrick depailler","jochen mass","alan jones"],
+        "Gran Premio de España": ["mario andretti","ronnie peterson","niki lauda","jody scheckter","emerson fittipaldi","carlos reutemann","james hunt","patrick depailler","jochen mass","alan jones"],
+        "Gran Premio de Suecia": ["niki lauda","riccardo patrese","ronnie peterson","mario andretti","jody scheckter","emerson fittipaldi","carlos reutemann","james hunt","patrick depailler","jochen mass"],
+        "Gran Premio de Francia": ["mario andretti","ronnie peterson","james hunt","jody scheckter","niki lauda","emerson fittipaldi","carlos reutemann","patrick depailler","jochen mass","alan jones"],
+        "Gran Premio de Gran Bretaña": ["carlos reutemann","niki lauda","jody scheckter","mario andretti","ronnie peterson","james hunt","emerson fittipaldi","patrick depailler","jochen mass","alan jones"],
+        "Gran Premio de Alemania": ["mario andretti","jody scheckter","niki lauda","emerson fittipaldi","ronnie peterson","carlos reutemann","james hunt","patrick depailler","jochen mass","alan jones"],
+        "Gran Premio de Austria": ["ronnie peterson","patrick depailler","niki lauda","mario andretti","emerson fittipaldi","jody scheckter","carlos reutemann","james hunt","jochen mass","alan jones"],
+        "Gran Premio de Países Bajos": ["mario andretti","ronnie peterson","niki lauda","emerson fittipaldi","jody scheckter","carlos reutemann","james hunt","patrick depailler","jochen mass","alan jones"],
+        "Gran Premio de Italia": ["niki lauda","carlos reutemann","jody scheckter","james hunt","emerson fittipaldi","mario andretti","patrick depailler","jochen mass","alan jones","riccardo patrese"],
+        "Gran Premio de Estados Unidos Este": ["carlos reutemann","mario andretti","niki lauda","jody scheckter","james hunt","emerson fittipaldi","ronnie peterson","patrick depailler","jochen mass","alan jones"],
+        "Gran Premio de Canadá": ["jody scheckter","mario andretti","niki lauda","emerson fittipaldi","carlos reutemann","james hunt","ronnie peterson","patrick depailler","jochen mass","alan jones"],
     },
     1979: {
-        "Gran Premio de Mónaco":        ["jody scheckter","clay regazzoni","carlos reutemann","john watson","patrick depailler","jochen mass","gilles villeneuve","alan jones","derek daly","mario andretti"],
-        "Gran Premio de Gran Bretaña":  ["clay regazzoni","rene arnoux","jean-pierre jarier","john watson","jochen mass","carlos reutemann","mario andretti","nelson piquet","daly derek","jacky ickx"],
-        "Gran Premio de Francia":       ["jean-pierre jabouille","gilles villeneuve","rene arnoux","alan jones","jody scheckter","clay regazzoni","john watson","mario andretti","carlos reutemann","jochen mass"],
+        "Gran Premio de Argentina": ["jacques laffite","carlos reutemann","jody scheckter","patrick depailler","mario andretti","gilles villeneuve","niki lauda","carlos pace","alan jones","jochen mass"],
+        "Gran Premio de Brasil": ["jacques laffite","patrick depailler","mario andretti","jody scheckter","gilles villeneuve","carlos reutemann","niki lauda","alan jones","jochen mass","carlos pace"],
+        "Gran Premio de Sudáfrica": ["gilles villeneuve","jody scheckter","jean pierre jarier","carlos reutemann","mario andretti","jochen mass","niki lauda","alan jones","patrick depailler","carlos pace"],
+        "Gran Premio de Estados Unidos Oeste": ["gilles villeneuve","jody scheckter","carlos reutemann","mario andretti","jean pierre jarier","niki lauda","jochen mass","alan jones","patrick depailler","carlos pace"],
+        "Gran Premio de España": ["patrick depailler","carlos reutemann","mario andretti","jody scheckter","gilles villeneuve","niki lauda","jochen mass","alan jones","jean pierre jarier","carlos pace"],
+        "Gran Premio de Bélgica": ["jody scheckter","gilles villeneuve","alan jones","carlos reutemann","mario andretti","niki lauda","jean pierre jarier","jochen mass","patrick depailler","carlos pace"],
+        "Gran Premio de Mónaco": ["jody scheckter","clay regazzoni","carlos reutemann","john watson","patrick depailler","mario andretti","gilles villeneuve","niki lauda","jochen mass","alan jones"],
+        "Gran Premio de Francia": ["jean pierre jabouille","gilles villeneuve","alan jones","jody scheckter","clay regazzoni","carlos reutemann","mario andretti","niki lauda","jochen mass","patrick depailler"],
+        "Gran Premio de Gran Bretaña": ["clay regazzoni","alan jones","jody scheckter","gilles villeneuve","carlos reutemann","mario andretti","niki lauda","jochen mass","jean pierre jarier","patrick depailler"],
+        "Gran Premio de Alemania": ["alan jones","clay regazzoni","jacky ickx","jody scheckter","gilles villeneuve","carlos reutemann","mario andretti","niki lauda","jochen mass","jean pierre jarier"],
+        "Gran Premio de Austria": ["alan jones","gilles villeneuve","jody scheckter","clay regazzoni","carlos reutemann","mario andretti","niki lauda","jochen mass","jean pierre jarier","patrick depailler"],
+        "Gran Premio de Países Bajos": ["alan jones","jody scheckter","gilles villeneuve","carlos reutemann","mario andretti","niki lauda","clay regazzoni","jochen mass","jean pierre jarier","patrick depailler"],
+        "Gran Premio de Italia": ["jody scheckter","gilles villeneuve","clay regazzoni","alan jones","carlos reutemann","mario andretti","niki lauda","jochen mass","jean pierre jarier","patrick depailler"],
+        "Gran Premio de Canadá": ["alan jones","gilles villeneuve","clay regazzoni","jody scheckter","carlos reutemann","mario andretti","niki lauda","jochen mass","jean pierre jarier","patrick depailler"],
+        "Gran Premio de Estados Unidos Este": ["gilles villeneuve","jody scheckter","alan jones","clay regazzoni","carlos reutemann","mario andretti","niki lauda","jochen mass","jean pierre jarier","patrick depailler"],
+    },
+    1980: {
+        "Gran Premio de Argentina": ["alan jones","nelson piquet","keke rosberg","elio de angelis","carlos reutemann","gilles villeneuve","didier pironi","jody scheckter","jochen mass","jean pierre jabouille"],
+        "Gran Premio de Brasil": ["rene arnoux","elio de angelis","alan jones","carlos reutemann","didier pironi","jean pierre jabouille","nelson piquet","gilles villeneuve","jochen mass","jody scheckter"],
+        "Gran Premio de Sudáfrica": ["rene arnoux","alan jones","carlos reutemann","didier pironi","nelson piquet","gilles villeneuve","jochen mass","jody scheckter","jean pierre jabouille","elio de angelis"],
+        "Gran Premio de Estados Unidos Oeste": ["nelson piquet","riccardo patrese","gilles villeneuve","alan jones","carlos reutemann","didier pironi","jochen mass","jody scheckter","rene arnoux","elio de angelis"],
+        "Gran Premio de Bélgica": ["didier pironi","alan jones","carlos reutemann","nelson piquet","gilles villeneuve","jochen mass","jody scheckter","rene arnoux","elio de angelis","jean pierre jabouille"],
+        "Gran Premio de Mónaco": ["carlos reutemann","jody scheckter","nelson piquet","gilles villeneuve","jean pierre jabouille","alan jones","didier pironi","jochen mass","rene arnoux","elio de angelis"],
+        "Gran Premio de Francia": ["alan jones","didier pironi","carlos reutemann","nelson piquet","gilles villeneuve","jochen mass","jody scheckter","rene arnoux","jean pierre jabouille","elio de angelis"],
+        "Gran Premio de Gran Bretaña": ["alan jones","carlos reutemann","nelson piquet","didier pironi","gilles villeneuve","jochen mass","jody scheckter","rene arnoux","jean pierre jabouille","elio de angelis"],
+        "Gran Premio de Alemania": ["alan jones","carlos reutemann","nelson piquet","didier pironi","jochen mass","gilles villeneuve","jody scheckter","rene arnoux","jean pierre jabouille","elio de angelis"],
+        "Gran Premio de Austria": ["jean pierre jabouille","carlos reutemann","alan jones","nelson piquet","didier pironi","gilles villeneuve","jochen mass","jody scheckter","rene arnoux","elio de angelis"],
+        "Gran Premio de Países Bajos": ["nelson piquet","rene arnoux","alan jones","carlos reutemann","gilles villeneuve","didier pironi","jochen mass","jody scheckter","jean pierre jabouille","elio de angelis"],
+        "Gran Premio de Italia": ["nelson piquet","alan jones","carlos reutemann","didier pironi","gilles villeneuve","jochen mass","jody scheckter","rene arnoux","jean pierre jabouille","elio de angelis"],
+        "Gran Premio de Canadá": ["alan jones","carlos reutemann","gilles villeneuve","didier pironi","jody scheckter","nelson piquet","jochen mass","rene arnoux","jean pierre jabouille","elio de angelis"],
+        "Gran Premio de Estados Unidos Este": ["alan jones","carlos reutemann","nelson piquet","gilles villeneuve","didier pironi","jochen mass","jody scheckter","rene arnoux","jean pierre jabouille","elio de angelis"],
+    },
+    1981: {
+        "Gran Premio de Estados Unidos Oeste": ["alan jones","carlos reutemann","nelson piquet","riccardo patrese","john watson","gilles villeneuve","elio de angelis","eddie cheever","patrick tambay","marc surer"],
+        "Gran Premio de Brasil": ["carlos reutemann","alan jones","riccardo patrese","marc surer","elio de angelis","hector rebaque","john watson","keke rosberg","derek daly","nelson piquet"],
+        "Gran Premio de Argentina": ["nelson piquet","carlos reutemann","alain prost","alan jones","riccardo patrese","hector rebaque","elio de angelis","keke rosberg","marc surer","derek daly"],
+        "Gran Premio de San Marino": ["nelson piquet","riccardo patrese","carlos reutemann","hector rebaque","gilles villeneuve","derek daly","elio de angelis","didier pironi","marc surer","john watson"],
+        "Gran Premio de Bélgica": ["carlos reutemann","nigel mansell","riccardo patrese","gilles villeneuve","elio de angelis","john watson","alan jones","hector rebaque","derek daly","marc surer"],
+        "Gran Premio de Mónaco": ["gilles villeneuve","alan jones","john watson","carlos reutemann","derek daly","didier pironi","marc surer","elio de angelis","riccardo patrese","hector rebaque"],
+        "Gran Premio de España": ["gilles villeneuve","john watson","carlos reutemann","alan jones","elio de angelis","keke rosberg","hector rebaque","marc surer","riccardo patrese","nigel mansell"],
+        "Gran Premio de Francia": ["alain prost","john watson","nelson piquet","riccardo patrese","alan jones","keke rosberg","elio de angelis","gilles villeneuve","carlos reutemann","hector rebaque"],
+        "Gran Premio de Gran Bretaña": ["john watson","carlos reutemann","alan jones","keke rosberg","hector rebaque","elio de angelis","riccardo patrese","derek daly","marc surer","nigel mansell"],
+        "Gran Premio de Alemania": ["nelson piquet","alain prost","john watson","carlos reutemann","hector rebaque","derek daly","riccardo patrese","elio de angelis","marc surer","keke rosberg"],
+        "Gran Premio de Austria": ["jacques laffite","carlos reutemann","nelson piquet","alan jones","john watson","elio de angelis","alain prost","hector rebaque","gilles villeneuve","riccardo patrese"],
+        "Gran Premio de Países Bajos": ["alain prost","nelson piquet","alan jones","hector rebaque","elio de angelis","riccardo patrese","carlos reutemann","john watson","eddie cheever","marc surer"],
+        "Gran Premio de Italia": ["alain prost","alan jones","carlos reutemann","nelson piquet","riccardo patrese","hector rebaque","john watson","elio de angelis","eddie cheever","marc surer"],
+        "Gran Premio de Canadá": ["jacques laffite","john watson","gilles villeneuve","elio de angelis","nelson piquet","carlos reutemann","keke rosberg","hector rebaque","marc surer","riccardo patrese"],
+        "Gran Premio de Las Vegas": ["alan jones","alain prost","bruno giacomelli","nelson piquet","carlos reutemann","riccardo patrese","elio de angelis","keke rosberg","john watson","hector rebaque"],
+    },
+    1982: {
+        "Gran Premio de Sudáfrica": ["alain prost","carlos reutemann","rene arnoux","riccardo patrese","niki lauda","keke rosberg","elio de angelis","gilles villeneuve","didier pironi","john watson"],
+        "Gran Premio de Brasil": ["alain prost","john watson","nelson piquet","carlos reutemann","niki lauda","keke rosberg","elio de angelis","riccardo patrese","derek daly","eddie cheever"],
+        "Gran Premio de Estados Unidos Oeste": ["niki lauda","keke rosberg","riccardo patrese","elio de angelis","andrea de cesaris","gilles villeneuve","john watson","carlos reutemann","derek daly","nelson piquet"],
+        "Gran Premio de San Marino": ["didier pironi","gilles villeneuve","michele alboreto","jean pierre jarier","riccardo patrese","nelson piquet","marc surer","elio de angelis","derek daly","teo fabi"],
+        "Gran Premio de Bélgica": ["john watson","keke rosberg","eddie cheever","elio de angelis","derek daly","carlos reutemann","niki lauda","nigel mansell","riccardo patrese","andrea de cesaris"],
+        "Gran Premio de Mónaco": ["riccardo patrese","didier pironi","andrea de cesaris","nigel mansell","elio de angelis","derek daly","rene arnoux","marc surer","keke rosberg","alain prost"],
+        "Gran Premio de Detroit": ["john watson","eddie cheever","didier pironi","keke rosberg","riccardo patrese","elio de angelis","niki lauda","andrea de cesaris","nigel mansell","carlos reutemann"],
+        "Gran Premio de Canadá": ["nelson piquet","riccardo patrese","john watson","elio de angelis","carlos reutemann","keke rosberg","alain prost","marc surer","andrea de cesaris","nigel mansell"],
+        "Gran Premio de Países Bajos": ["didier pironi","nelson piquet","keke rosberg","john watson","riccardo patrese","elio de angelis","andrea de cesaris","alain prost","niki lauda","carlos reutemann"],
+        "Gran Premio de Gran Bretaña": ["niki lauda","didier pironi","patrick tambay","elio de angelis","derek daly","keke rosberg","alain prost","marc surer","carlos reutemann","eddie cheever"],
+        "Gran Premio de Francia": ["rene arnoux","alain prost","didier pironi","riccardo patrese","keke rosberg","john watson","elio de angelis","derek daly","marc surer","niki lauda"],
+        "Gran Premio de Alemania": ["patrick tambay","eddie cheever","riccardo patrese","keke rosberg","john watson","alain prost","nelson piquet","elio de angelis","nigel mansell","derek daly"],
+        "Gran Premio de Austria": ["elio de angelis","keke rosberg","alain prost","riccardo patrese","niki lauda","john watson","nelson piquet","derek daly","marc surer","andrea de cesaris"],
+        "Gran Premio de Suiza": ["keke rosberg","alain prost","niki lauda","nelson piquet","riccardo patrese","john watson","elio de angelis","derek daly","marc surer","andrea de cesaris"],
+        "Gran Premio de Italia": ["rene arnoux","patrick tambay","mario andretti","keke rosberg","niki lauda","elio de angelis","john watson","riccardo patrese","derek daly","nelson piquet"],
+        "Gran Premio de Las Vegas": ["michelle alboreto","john watson","eddie cheever","alain prost","keke rosberg","chico serra","riccardo patrese","derek daly","elio de angelis","marc surer"],
+    },
+    1983: {
+        "Gran Premio de Brasil": ["nelson piquet","keke rosberg","alain prost","niki lauda","john watson","elio de angelis","eddie cheever","patrick tambay","jaques laffite","marc surer"],
+        "Gran Premio de Estados Unidos Oeste": ["john watson","niki lauda","rene arnoux","keke rosberg","jaques laffite","marc surer","patrick tambay","david thaddeus","elio de angelis","riccardo patrese"],
+        "Gran Premio de Francia": ["alain prost","nelson piquet","eddie cheever","derek warwick","keke rosberg","john watson","patrick tambay","elio de angelis","marc surer","riccardo patrese"],
+        "Gran Premio de San Marino": ["patrick tambay","riccardo patrese","alain prost","keke rosberg","nelson piquet","john watson","elio de angelis","marc surer","jaques laffite","nigel mansell"],
+        "Gran Premio de Mónaco": ["keke rosberg","nelson piquet","alain prost","elio de angelis","john watson","jaques laffite","patrick tambay","riccardo patrese","marc surer","derek warwick"],
+        "Gran Premio de Bélgica": ["alain prost","nelson piquet","eddie cheever","keke rosberg","riccardo patrese","nigel mansell","elio de angelis","derek warwick","marc surer","john watson"],
+        "Gran Premio de Detroit": ["nelson piquet","john watson","rene arnoux","keke rosberg","eddie cheever","elio de angelis","alain prost","marc surer","derek warwick","riccardo patrese"],
+        "Gran Premio de Canadá": ["rene arnoux","eddie cheever","nelson piquet","keke rosberg","john watson","alain prost","nigel mansell","elio de angelis","derek warwick","marc surer"],
+        "Gran Premio de Gran Bretaña": ["alain prost","nelson piquet","john watson","jaques laffite","riccardo patrese","keke rosberg","elio de angelis","derek warwick","marc surer","nigel mansell"],
+        "Gran Premio de Alemania": ["rene arnoux","andrea de cesaris","riccardo patrese","keke rosberg","alain prost","derek warwick","elio de angelis","nigel mansell","john watson","marc surer"],
+        "Gran Premio de Austria": ["alain prost","nelson piquet","rene arnoux","riccardo patrese","keke rosberg","elio de angelis","derek warwick","marc surer","nigel mansell","john watson"],
+        "Gran Premio de Países Bajos": ["rene arnoux","john watson","eddie cheever","keke rosberg","alain prost","riccardo patrese","elio de angelis","nelson piquet","nigel mansell","derek warwick"],
+        "Gran Premio de Italia": ["nelson piquet","rene arnoux","eddie cheever","riccardo patrese","alain prost","keke rosberg","elio de angelis","marc surer","derek warwick","nigel mansell"],
+        "Gran Premio de Europa": ["alain prost","nelson piquet","rene arnoux","elio de angelis","derek warwick","john watson","riccardo patrese","nigel mansell","jaques laffite","marc surer"],
+        "Gran Premio de Sudáfrica": ["riccardo patrese","andrea de cesaris","nelson piquet","keke rosberg","alain prost","elio de angelis","rene arnoux","derek warwick","marc surer","john watson"],
     },
     1984: {
-        "Gran Premio de Mónaco":       ["alain prost","ayrton senna","stefan bellof","rene arnoux","keke rosberg","michele alboreto","nigel mansell","niki lauda","derek bell","jonathan palmer"],
+        "Gran Premio de Brasil": ["alain prost","keke rosberg","elio de angelis","derek warwick","rene arnoux","eddie cheever","nigel mansell","marc surer","riccardo patrese","martin brundle"],
+        "Gran Premio de Sudáfrica": ["niki lauda","alain prost","riccardo patrese","derek warwick","elio de angelis","rene arnoux","marc surer","keke rosberg","nigel mansell","johnny cecotto"],
+        "Gran Premio de Bélgica": ["michelle alboreto","derek warwick","rene arnoux","keke rosberg","nigel mansell","elio de angelis","riccardo patrese","alain prost","marc surer","teo fabi"],
+        "Gran Premio de San Marino": ["alain prost","rene arnoux","elio de angelis","derek warwick","keke rosberg","riccardo patrese","nigel mansell","marc surer","teo fabi","andrea de cesaris"],
+        "Gran Premio de Francia": ["niki lauda","alain prost","rene arnoux","keke rosberg","elio de angelis","derek warwick","marc surer","nigel mansell","riccardo patrese","andrea de cesaris"],
+        "Gran Premio de Mónaco": ["alain prost","ayrton senna","stefan bellof","rene arnoux","keke rosberg","michelle alboreto","nigel mansell","niki lauda","derek bell","jonathan palmer"],
+        "Gran Premio de Canadá": ["nelson piquet","alain prost","elio de angelis","niki lauda","keke rosberg","rene arnoux","riccardo patrese","derek warwick","marc surer","johnny cecotto"],
+        "Gran Premio de Detroit": ["nelson piquet","alain prost","keke rosberg","derek warwick","elio de angelis","rene arnoux","teo fabi","marc surer","nigel mansell","riccardo patrese"],
+        "Gran Premio de Dallas": ["keke rosberg","rene arnoux","elio de angelis","derek warwick","niki lauda","alain prost","michelle alboreto","marc surer","riccardo patrese","teo fabi"],
         "Gran Premio de Gran Bretaña": ["niki lauda","derek warwick","ayrton senna","elio de angelis","jonathan palmer","nigel mansell","alain prost","jacques laffite","niki lauda","martin brundle"],
+        "Gran Premio de Alemania": ["alain prost","niki lauda","derek warwick","rene arnoux","keke rosberg","elio de angelis","riccardo patrese","marc surer","teo fabi","andrea de cesaris"],
+        "Gran Premio de Austria": ["niki lauda","alain prost","nelson piquet","riccardo patrese","elio de angelis","rene arnoux","keke rosberg","derek warwick","marc surer","nigel mansell"],
+        "Gran Premio de Países Bajos": ["alain prost","niki lauda","nigel mansell","elio de angelis","derek warwick","rene arnoux","keke rosberg","riccardo patrese","marc surer","jonathan palmer"],
+        "Gran Premio de Italia": ["niki lauda","michelle alboreto","riccardo patrese","stefan johansson","elio de angelis","keke rosberg","marc surer","derek warwick","rene arnoux","nigel mansell"],
+        "Gran Premio de Europa": ["alain prost","michelle alboreto","niki lauda","elio de angelis","keke rosberg","riccardo patrese","derek warwick","marc surer","teo fabi","nigel mansell"],
+        "Gran Premio de Portugal": ["alain prost","niki lauda","ayrton senna","michelle alboreto","elio de angelis","keke rosberg","riccardo patrese","derek warwick","rene arnoux","nigel mansell"],
+    },
+    1985: {
+        "Gran Premio de Brasil": ["alain prost","michelle alboreto","elio de angelis","keke rosberg","ayrton senna","nigel mansell","stefan johansson","derek warwick","riccardo patrese","thierry boutsen"],
+        "Gran Premio de Portugal": ["ayrton senna","alain prost","michelle alboreto","riccardo patrese","elio de angelis","nigel mansell","derek warwick","stefan johansson","keke rosberg","marc surer"],
+        "Gran Premio de San Marino": ["elio de angelis","thierry boutsen","patrick tambay","ayrton senna","stefan johansson","riccardo patrese","marc surer","derek warwick","michelle alboreto","keke rosberg"],
+        "Gran Premio de Mónaco": ["ayrton senna","michelle alboreto","alain prost","elio de angelis","keke rosberg","derek warwick","riccardo patrese","nigel mansell","stefan johansson","marc surer"],
+        "Gran Premio de Canadá": ["michelle alboreto","stefan johansson","alain prost","ayrton senna","keke rosberg","riccardo patrese","elio de angelis","thierry boutsen","patrick tambay","marc surer"],
+        "Gran Premio de Detroit": ["keke rosberg","ayrton senna","stefan johansson","michelle alboreto","elio de angelis","nigel mansell","alain prost","thierry boutsen","derek warwick","riccardo patrese"],
+        "Gran Premio de Francia": ["nigel mansell","alain prost","elio de angelis","keke rosberg","ayrton senna","michelle alboreto","riccardo patrese","derek warwick","stefan johansson","thierry boutsen"],
+        "Gran Premio de Gran Bretaña": ["alain prost","michelle alboreto","nigel mansell","ayrton senna","keke rosberg","riccardo patrese","elio de angelis","derek warwick","thierry boutsen","stefan johansson"],
+        "Gran Premio de Alemania": ["michelle alboreto","alain prost","nigel mansell","ayrton senna","elio de angelis","stefan johansson","keke rosberg","derek warwick","riccardo patrese","thierry boutsen"],
+        "Gran Premio de Austria": ["alain prost","ayrton senna","michelle alboreto","nigel mansell","elio de angelis","stefan johansson","keke rosberg","riccardo patrese","derek warwick","thierry boutsen"],
+        "Gran Premio de Países Bajos": ["niki lauda","alain prost","ayrton senna","michelle alboreto","elio de angelis","nigel mansell","keke rosberg","stefan johansson","riccardo patrese","derek warwick"],
+        "Gran Premio de Italia": ["ayrton senna","alain prost","elio de angelis","keke rosberg","riccardo patrese","nigel mansell","stefan johansson","derek warwick","thierry boutsen","michelle alboreto"],
+        "Gran Premio de Bélgica": ["ayrton senna","nigel mansell","alain prost","michelle alboreto","elio de angelis","keke rosberg","riccardo patrese","derek warwick","stefan johansson","thierry boutsen"],
+        "Gran Premio de Europa": ["nigel mansell","ayrton senna","alain prost","michelle alboreto","elio de angelis","keke rosberg","riccardo patrese","derek warwick","stefan johansson","thierry boutsen"],
+        "Gran Premio de Sudáfrica": ["nigel mansell","keke rosberg","alain prost","michelle alboreto","ayrton senna","elio de angelis","riccardo patrese","derek warwick","stefan johansson","thierry boutsen"],
+        "Gran Premio de Australia": ["keke rosberg","nigel mansell","ayrton senna","alain prost","michelle alboreto","elio de angelis","riccardo patrese","derek warwick","stefan johansson","thierry boutsen"],
     },
     1986: {
-        "Gran Premio de Australia":    ["alain prost","nelson piquet","stefan johansson","martin brundle","philippe streiff","thierry boutsen","philippe alliot","christian danner","alan jones","gerhard berger"],
-        "Gran Premio de San Marino":   ["alain prost","nelson piquet","gerhard berger","stefan johansson","riccardo patrese","andrea de cesaris","derek warwick","christian danner","jonathan palmer","thierry boutsen"],
+        "Gran Premio de Brasil": ["nelson piquet","ayrton senna","alain prost","keke rosberg","michelle alboreto","riccardo patrese","nigel mansell","rene arnoux","derek warwick","thierry boutsen"],
+        "Gran Premio de España": ["ayrton senna","nigel mansell","alain prost","keke rosberg","nelson piquet","michelle alboreto","riccardo patrese","rene arnoux","derek warwick","thierry boutsen"],
+        "Gran Premio de San Marino": ["alain prost","nelson piquet","gerhard berger","stefan johansson","riccardo patrese","andrea de cesaris","derek warwick","christian danner","jonathan palmer","thierry boutsen"],
+        "Gran Premio de Mónaco": ["alain prost","keke rosberg","ayrton senna","nigel mansell","stefan johansson","michelle alboreto","riccardo patrese","rene arnoux","derek warwick","thierry boutsen"],
+        "Gran Premio de Bélgica": ["nigel mansell","ayrton senna","stefan johansson","alain prost","keke rosberg","michelle alboreto","riccardo patrese","rene arnoux","derek warwick","thierry boutsen"],
+        "Gran Premio de Canadá": ["nigel mansell","alain prost","nelson piquet","rene arnoux","keke rosberg","stefan johansson","michelle alboreto","riccardo patrese","derek warwick","thierry boutsen"],
+        "Gran Premio de Detroit": ["ayrton senna","keke rosberg","alain prost","nigel mansell","nelson piquet","stefan johansson","derek warwick","michelle alboreto","riccardo patrese","thierry boutsen"],
+        "Gran Premio de Francia": ["nigel mansell","alain prost","nelson piquet","keke rosberg","ayrton senna","stefan johansson","michelle alboreto","rene arnoux","derek warwick","thierry boutsen"],
+        "Gran Premio de Gran Bretaña": ["nigel mansell","nelson piquet","alain prost","ayrton senna","keke rosberg","stefan johansson","michelle alboreto","riccardo patrese","derek warwick","thierry boutsen"],
+        "Gran Premio de Alemania": ["nelson piquet","ayrton senna","nigel mansell","alain prost","keke rosberg","stefan johansson","michelle alboreto","riccardo patrese","derek warwick","rene arnoux"],
+        "Gran Premio de Hungría": ["nelson piquet","ayrton senna","nigel mansell","stefan johansson","alain prost","keke rosberg","michelle alboreto","riccardo patrese","derek warwick","thierry boutsen"],
+        "Gran Premio de Austria": ["alain prost","michelle alboreto","stefan johansson","nigel mansell","ayrton senna","keke rosberg","nelson piquet","riccardo patrese","derek warwick","thierry boutsen"],
+        "Gran Premio de Italia": ["nelson piquet","nigel mansell","stefan johansson","alain prost","keke rosberg","ayrton senna","riccardo patrese","michelle alboreto","derek warwick","thierry boutsen"],
+        "Gran Premio de Portugal": ["nigel mansell","alain prost","nelson piquet","ayrton senna","keke rosberg","stefan johansson","michelle alboreto","riccardo patrese","derek warwick","thierry boutsen"],
+        "Gran Premio de México": ["berger","alain prost","ayrton senna","nelson piquet","nigel mansell","stefan johansson","keke rosberg","riccardo patrese","derek warwick","thierry boutsen"],
+        "Gran Premio de Australia": ["alain prost","nelson piquet","stefan johansson","martin brundle","philippe streiff","thierry boutsen","philippe alliot","christian danner","alan jones","gerhard berger"],
+    },
+    1987: {
+        "Gran Premio de Brasil": ["alain prost","nelson piquet","stefan johansson","ayrton senna","gerhard berger","michele alboreto","thierry boutsen","riccardo patrese","derek warwick","eddie cheever"],
+        "Gran Premio de San Marino": ["nigel mansell","ayrton senna","stefan johansson","teo fabi","eddie cheever","thierry boutsen","satoru nakajima","riccardo patrese","derek warwick","jonathan palmer"],
+        "Gran Premio de Bélgica": ["alain prost","stefan johansson","andrea de cesaris","michel alboreto","thierry boutsen","satoru nakajima","riccardo patrese","derek warwick","nigel mansell","ayrton senna"],
+        "Gran Premio de Mónaco": ["ayrton senna","nelson piquet","michelle alboreto","gerhard berger","stefan johansson","thierry boutsen","riccardo patrese","derek warwick","satoru nakajima","nigel mansell"],
+        "Gran Premio de Detroit": ["ayrton senna","nelson piquet","alain prost","riccardo patrese","eddie cheever","thierry boutsen","derek warwick","stefan johansson","satoru nakajima","michelle alboreto"],
+        "Gran Premio de Francia": ["nigel mansell","alain prost","ayrton senna","nelson piquet","riccardo patrese","stefan johansson","gerhard berger","thierry boutsen","derek warwick","satoru nakajima"],
+        "Gran Premio de Gran Bretaña": ["nigel mansell","nelson piquet","ayrton senna","alain prost","riccardo patrese","derek warwick","thierry boutsen","satoru nakajima","stefan johansson","gerhard berger"],
+        "Gran Premio de Alemania": ["nelson piquet","stefan johansson","ayrton senna","thierry boutsen","gerhard berger","alain prost","riccardo patrese","derek warwick","satoru nakajima","eddie cheever"],
+        "Gran Premio de Hungría": ["nelson piquet","ayrton senna","alain prost","thierry boutsen","riccardo patrese","derek warwick","satoru nakajima","stefan johansson","gerhard berger","michelle alboreto"],
+        "Gran Premio de Austria": ["nigel mansell","nelson piquet","teo fabi","ayrton senna","thierry boutsen","gerhard berger","riccardo patrese","derek warwick","satoru nakajima","alain prost"],
+        "Gran Premio de Italia": ["ayrton senna","nelson piquet","nigel mansell","alain prost","stefan johansson","thierry boutsen","riccardo patrese","derek warwick","satoru nakajima","gerhard berger"],
+        "Gran Premio de Portugal": ["alain prost","gerhard berger","nelson piquet","nigel mansell","stefan johansson","thierry boutsen","riccardo patrese","derek warwick","satoru nakajima","ayrton senna"],
+        "Gran Premio de España": ["nigel mansell","alain prost","ayrton senna","gerhard berger","stefan johansson","thierry boutsen","riccardo patrese","derek warwick","satoru nakajima","michelle alboreto"],
+        "Gran Premio de México": ["nigel mansell","nelson piquet","riccardo patrese","eddie cheever","ayrton senna","teo fabi","thierry boutsen","satoru nakajima","derek warwick","gerhard berger"],
+        "Gran Premio de Japón": ["gerhard berger","ayrton senna","thierry boutsen","riccardo patrese","derek warwick","satoru nakajima","nigel mansell","nelson piquet","stefan johansson","alain prost"],
+        "Gran Premio de Australia": ["gerhard berger","ayrton senna","thierry boutsen","michelle alboreto","riccardo patrese","derek warwick","satoru nakajima","nigel mansell","stefan johansson","alain prost"],
     },
     1988: {
-        "Gran Premio de Mónaco":       ["ayrton senna","alain prost","gerhard berger","michele alboreto","thierry boutsen","derek warwick","bernd schneider","stefano modena","alex caffi","pierluigi martini"],
+        "Gran Premio de Brasil": ["alain prost","gerhard berger","nelson piquet","thierry boutsen","derek warwick","andrea de cesaris","riccardo patrese","martin brundle","jonathan palmer","nicola larini"],
+        "Gran Premio de San Marino": ["ayrton senna","alain prost","nelson piquet","thierry boutsen","derek warwick","andrea de cesaris","riccardo patrese","satoru nakajima","martin brundle","nigel mansell"],
+        "Gran Premio de Mónaco": ["ayrton senna","alain prost","gerhard berger","michele alboreto","thierry boutsen","derek warwick","bernd schneider","stefano modena","alex caffi","pierluigi martini"],
+        "Gran Premio de México": ["alain prost","ayrton senna","gerhard berger","michelle alboreto","thierry boutsen","derek warwick","nelson piquet","riccardo patrese","andrea de cesaris","satoru nakajima"],
+        "Gran Premio de Canadá": ["ayrton senna","alain prost","thierry boutsen","nelson piquet","riccardo patrese","gerhard berger","derek warwick","satoru nakajima","andrea de cesaris","martin brundle"],
+        "Gran Premio de Detroit": ["ayrton senna","alain prost","thierry boutsen","andrea de cesaris","nelson piquet","riccardo patrese","derek warwick","satoru nakajima","gerhard berger","martin brundle"],
+        "Gran Premio de Francia": ["alain prost","ayrton senna","thierry boutsen","gerhard berger","nelson piquet","riccardo patrese","derek warwick","andrea de cesaris","satoru nakajima","martin brundle"],
         "Gran Premio de Gran Bretaña": ["ayrton senna","nigel mansell","alain prost","martin brundle","gerhard berger","stefan johansson","nelson piquet","derek warwick","thierry boutsen","mauricio gugelmin"],
-        "Gran Premio de Hungría":      ["ayrton senna","alain prost","thierry boutsen","gerhard berger","derek warwick","riccardo patrese","mauricio gugelmin","ivan capelli","pierluigi martini","nelson piquet"],
-        "Gran Premio de Italia":       ["gerhard berger","michele alboreto","eddie cheever","derek warwick","thierry boutsen","riccardo patrese","andrea de cesaris","pierluigi martini","jonathan palmer","alex caffi"],
+        "Gran Premio de Alemania": ["ayrton senna","alain prost","gerhard berger","thierry boutsen","nelson piquet","riccardo patrese","derek warwick","satoru nakajima","martin brundle","andrea de cesaris"],
+        "Gran Premio de Hungría": ["ayrton senna","alain prost","thierry boutsen","gerhard berger","derek warwick","riccardo patrese","mauricio gugelmin","ivan capelli","pierluigi martini","nelson piquet"],
+        "Gran Premio de Bélgica": ["ayrton senna","alain prost","gerhard berger","thierry boutsen","nelson piquet","riccardo patrese","derek warwick","satoru nakajima","martin brundle","andrea de cesaris"],
+        "Gran Premio de Italia": ["gerhard berger","michele alboreto","eddie cheever","derek warwick","thierry boutsen","riccardo patrese","andrea de cesaris","pierluigi martini","jonathan palmer","alex caffi"],
+        "Gran Premio de Portugal": ["alain prost","ivan capelli","thierry boutsen","derek warwick","nelson piquet","riccardo patrese","andrea de cesaris","satoru nakajima","martin brundle","jonathan palmer"],
+        "Gran Premio de España": ["alain prost","nigel mansell","ayrton senna","allessandro nannini","thierry boutsen","derek warwick","riccardo patrese","satoru nakajima","andrea de cesaris","martin brundle"],
+        "Gran Premio de Japón": ["ayrton senna","alain prost","thierry boutsen","gerhard berger","nelson piquet","riccardo patrese","derek warwick","satoru nakajima","martin brundle","andrea de cesaris"],
+        "Gran Premio de Australia": ["alain prost","ayrton senna","nelson piquet","thierry boutsen","riccardo patrese","gerhard berger","derek warwick","satoru nakajima","martin brundle","andrea de cesaris"],
     },
     1989: {
+        "Gran Premio de Brasil": ["nigel mansell","ayrton senna","rene arnoux","thierry boutsen","allessandro nannini","derek warwick","nelson piquet","riccardo patrese","andrea de cesaris","satoru nakajima"],
+        "Gran Premio de San Marino": ["ayrton senna","alain prost","allessandro nannini","thierry boutsen","gerhard berger","nelson piquet","derek warwick","riccardo patrese","andrea de cesaris","satoru nakajima"],
+        "Gran Premio de Mónaco": ["ayrton senna","alain prost","stefano modena","nigel mansell","eddie cheever","riccardo patrese","gerhard berger","nelson piquet","emanuele pirro","oscar larrauri"],
+        "Gran Premio de México": ["ayrton senna","riccardo patrese","derek warwick","thierry boutsen","allessandro nannini","gerhard berger","nelson piquet","andrea de cesaris","satoru nakajima","martin brundle"],
+        "Gran Premio de Estados Unidos": ["ayrton senna","alain prost","riccardo patrese","thierry boutsen","allessandro nannini","derek warwick","nelson piquet","andrea de cesaris","satoru nakajima","martin brundle"],
+        "Gran Premio de Canadá": ["thierry boutsen","riccardo patrese","allessandro nannini","ayrton senna","alain prost","andrea de cesaris","nelson piquet","derek warwick","satoru nakajima","martin brundle"],
+        "Gran Premio de Francia": ["alain prost","ayrton senna","riccardo patrese","thierry boutsen","allessandro nannini","derek warwick","nelson piquet","andrea de cesaris","satoru nakajima","martin brundle"],
         "Gran Premio de Gran Bretaña": ["alain prost","nigel mansell","ayrton senna","gerhard berger","nelson piquet","thierry boutsen","stefano modena","christian danner","derek warwick","pierluigi martini"],
-        "Gran Premio de Mónaco":       ["ayrton senna","alain prost","stefano modena","nigel mansell","eddie cheever","riccardo patrese","gerhard berger","nelson piquet","emanuele pirro","oscar larrauri"],
+        "Gran Premio de Alemania": ["ayrton senna","alain prost","riccardo patrese","thierry boutsen","allessandro nannini","gerhard berger","nelson piquet","andrea de cesaris","satoru nakajima","derek warwick"],
+        "Gran Premio de Hungría": ["nigel mansell","ayrton senna","thierry boutsen","alain prost","riccardo patrese","allessandro nannini","gerhard berger","nelson piquet","andrea de cesaris","satoru nakajima"],
+        "Gran Premio de Bélgica": ["ayrton senna","alain prost","allessandro nannini","thierry boutsen","riccardo patrese","gerhard berger","nelson piquet","andrea de cesaris","satoru nakajima","derek warwick"],
+        "Gran Premio de Italia": ["alain prost","gerhard berger","thierry boutsen","allessandro nannini","riccardo patrese","nigel mansell","derek warwick","andrea de cesaris","satoru nakajima","martin brundle"],
+        "Gran Premio de Portugal": ["gerhard berger","alain prost","joao camoes","thierry boutsen","allessandro nannini","riccardo patrese","nelson piquet","andrea de cesaris","satoru nakajima","derek warwick"],
+        "Gran Premio de España": ["ayrton senna","gerhard berger","alain prost","riccardo patrese","jean alesi","thierry boutsen","allessandro nannini","derek warwick","andrea de cesaris","satoru nakajima"],
+        "Gran Premio de Japón": ["allessandro nannini","riccardo patrese","thierry boutsen","nelson piquet","satoru nakajima","alain prost","gerhard berger","derek warwick","andrea de cesaris","martin brundle"],
+        "Gran Premio de Australia": ["thierry boutsen","allessandro nannini","riccardo patrese","satoru nakajima","martin brundle","derek warwick","nigel mansell","andrea de cesaris","alain prost","gerhard berger"],
     },
     1990: {
-        "Gran Premio de Mónaco":       ["ayrton senna","jean alesi","gerhard berger","thierry boutsen","roberto moreno","aguri suzuki","derek warwick","eric bernard","stefan johansson","alex caffi"],
-        "Gran Premio de Japón":        ["nelson piquet","roberto moreno","aguri suzuki","thierry boutsen","nigel mansell","jean alesi","riccardo patrese","derek warwick","alain prost","stefano modena"],
+        "Gran Premio de Estados Unidos": ["ayrton senna","jean alesi","thierry boutsen","allessandro nannini","gerhard berger","nelson piquet","riccardo patrese","aguri suzuki","derek warwick","eric bernard"],
+        "Gran Premio de Brasil": ["alain prost","gerhard berger","ayrton senna","nigel mansell","thierry boutsen","riccardo patrese","jean alesi","allessandro nannini","nelson piquet","derek warwick"],
+        "Gran Premio de San Marino": ["riccardo patrese","gerhard berger","ayrton senna","alain prost","nigel mansell","thierry boutsen","allessandro nannini","nelson piquet","jean alesi","derek warwick"],
+        "Gran Premio de Mónaco": ["ayrton senna","jean alesi","gerhard berger","thierry boutsen","roberto moreno","aguri suzuki","derek warwick","eric bernard","stefan johansson","alex caffi"],
+        "Gran Premio de Canadá": ["ayrton senna","nelson piquet","nigel mansell","gerhard berger","riccardo patrese","thierry boutsen","jean alesi","derek warwick","allessandro nannini","aguri suzuki"],
+        "Gran Premio de México": ["alain prost","nigel mansell","gerhard berger","ayrton senna","allessandro nannini","thierry boutsen","riccardo patrese","jean alesi","nelson piquet","derek warwick"],
+        "Gran Premio de Francia": ["alain prost","ivan capelli","ayrton senna","nigel mansell","jean alesi","thierry boutsen","gerhard berger","riccardo patrese","allessandro nannini","nelson piquet"],
+        "Gran Premio de Gran Bretaña": ["alain prost","thierry boutsen","gerhard berger","ayrton senna","nigel mansell","jean alesi","riccardo patrese","allessandro nannini","nelson piquet","derek warwick"],
+        "Gran Premio de Alemania": ["ayrton senna","alain prost","gerhard berger","nigel mansell","riccardo patrese","thierry boutsen","jean alesi","allessandro nannini","nelson piquet","derek warwick"],
+        "Gran Premio de Hungría": ["thierry boutsen","ayrton senna","allessandro nannini","nigel mansell","riccardo patrese","gerhard berger","eric bernard","derek warwick","alain prost","nelson piquet"],
+        "Gran Premio de Bélgica": ["ayrton senna","alain prost","gerhard berger","nigel mansell","aguri suzuki","thierry boutsen","riccardo patrese","allessandro nannini","derek warwick","jean alesi"],
+        "Gran Premio de Italia": ["ayrton senna","alain prost","gerhard berger","nigel mansell","thierry boutsen","riccardo patrese","jean alesi","allessandro nannini","nelson piquet","derek warwick"],
+        "Gran Premio de Portugal": ["nigel mansell","ayrton senna","alain prost","gerhard berger","thierry boutsen","riccardo patrese","jean alesi","allessandro nannini","nelson piquet","derek warwick"],
+        "Gran Premio de España": ["alain prost","nigel mansell","ayrton senna","gerhard berger","thierry boutsen","riccardo patrese","jean alesi","allessandro nannini","nelson piquet","aguri suzuki"],
+        "Gran Premio de Japón": ["nelson piquet","roberto moreno","aguri suzuki","thierry boutsen","nigel mansell","jean alesi","riccardo patrese","derek warwick","alain prost","stefano modena"],
+        "Gran Premio de Australia": ["nelson piquet","alain prost","thierry boutsen","roberto moreno","aguri suzuki","jean alesi","riccardo patrese","derek warwick","allessandro nannini","gerhard berger"],
     },
     1991: {
-        "Gran Premio de Gran Bretaña": ["nigel mansell","gerhard berger","alain prost","ayrton senna","michael schumacher","bertrand gachot","roberto moreno","mark blundell","ivan capelli","j.j. lehto"],
-        "Gran Premio de Mónaco":       ["ayrton senna","nigel mansell","jean alesi","roberto moreno","stefano modena","bertrand gachot","j.j. lehto","eric bernard","pierluigi martini","emanuele pirro"],
-        "Gran Premio de San Marino":   ["ayrton senna","gerhard berger","j.j. lehto","riccardo patrese","martin brundle","jean alesi","pierluigi martini","bertrand gachot","roberto moreno","aguri suzuki"],
+        "Gran Premio de Estados Unidos":  ["ayrton senna","nelson piquet","jean alesi","mika hakkinen","andrea de cesaris","emanuele pirro","riccardo patrese","pierluigi martini","bertrand gachot","eric bernard"],
+        "Gran Premio de Brasil":          ["ayrton senna","riccardo patrese","gerhard berger","alain prost","nigel mansell","nelson piquet","andrea de cesaris","roberto moreno","pierluigi martini","emanuele pirro"],
+        "Gran Premio de San Marino":      ["ayrton senna","gerhard berger","j.j. lehto","riccardo patrese","martin brundle","jean alesi","pierluigi martini","bertrand gachot","roberto moreno","aguri suzuki"],
+        "Gran Premio de Mónaco":          ["ayrton senna","nigel mansell","jean alesi","roberto moreno","stefano modena","bertrand gachot","j.j. lehto","eric bernard","pierluigi martini","emanuele pirro"],
+        "Gran Premio de Canadá":          ["nigel mansell","nelson piquet","michael schumacher","jean alesi","andrea de cesaris","riccardo patrese","bertrand gachot","mika hakkinen","mark blundell","emanuele pirro"],
+        "Gran Premio de México":          ["riccardo patrese","nigel mansell","ayrton senna","alain prost","nelson piquet","jean alesi","gerhard berger","mika hakkinen","andrea de cesaris","emanuele pirro"],
+        "Gran Premio de Francia":         ["nigel mansell","alain prost","ayrton senna","gerhard berger","riccardo patrese","jean alesi","andrea de cesaris","mika hakkinen","thierry boutsen","pierluigi martini"],
+        "Gran Premio de Gran Bretaña":    ["nigel mansell","gerhard berger","alain prost","ayrton senna","michael schumacher","bertrand gachot","roberto moreno","mark blundell","ivan capelli","j.j. lehto"],
+        "Gran Premio de Alemania":        ["nigel mansell","riccardo patrese","jean alesi","ayrton senna","alain prost","michael schumacher","mika hakkinen","andrea de cesaris","emanuele pirro","bertrand gachot"],
+        "Gran Premio de Hungría":         ["ayrton senna","nigel mansell","riccardo patrese","gerhard berger","alain prost","jean alesi","roberto moreno","mika hakkinen","andrea de cesaris","thierry boutsen"],
+        "Gran Premio de Bélgica":         ["ayrton senna","gerhard berger","nigel mansell","riccardo patrese","roberto moreno","michael schumacher","jean alesi","stefano modena","andrea de cesaris","mika hakkinen"],
+        "Gran Premio de Italia":          ["nigel mansell","ayrton senna","alain prost","michael schumacher","jean alesi","gerhard berger","riccardo patrese","mika hakkinen","roberto moreno","andrea de cesaris"],
+        "Gran Premio de Portugal":        ["riccardo patrese","ayrton senna","jean alesi","alain prost","thierry boutsen","nigel mansell","stefano modena","pierluigi martini","martin brundle","andrea de cesaris"],
+        "Gran Premio de España":          ["nigel mansell","alain prost","riccardo patrese","ayrton senna","jean alesi","gerhard berger","michael schumacher","mika hakkinen","thierry boutsen","andrea de cesaris"],
+        "Gran Premio de Japón":           ["gerhard berger","ayrton senna","riccardo patrese","alain prost","michael schumacher","jean alesi","mika hakkinen","nigel mansell","andrea de cesaris","pierluigi martini"],
+        "Gran Premio de Australia":       ["ayrton senna","nigel mansell","gerhard berger","michael schumacher","martin brundle","thierry boutsen","riccardo patrese","jean alesi","mika hakkinen","roberto moreno"],
     },
     1992: {
-        "Gran Premio de Gran Bretaña": ["nigel mansell","riccardo patrese","martin brundle","michael schumacher","gerhard berger","ayrton senna","mika hakkinen","thierry boutsen","bertrand gachot","jean alesi"],
-        "Gran Premio de Hungría":      ["ayrton senna","nigel mansell","gerhard berger","michael schumacher","martin brundle","jean alesi","thierry boutsen","johnny herbert","bertrand gachot","ivan capelli"],
-        "Gran Premio de Bélgica":      ["michael schumacher","nigel mansell","riccardo patrese","ayrton senna","martin brundle","gerhard berger","mika hakkinen","erik comas","thierry boutsen","jean alesi"],
+        "Gran Premio de Sudáfrica":       ["nigel mansell","riccardo patrese","ayrton senna","mika hakkinen","martin brundle","gerhard berger","jean alesi","andrea de cesaris","pierluigi martini","thierry boutsen"],
+        "Gran Premio de México":          ["nigel mansell","riccardo patrese","michael schumacher","ayrton senna","jean alesi","gerhard berger","martin brundle","ivan capelli","mika hakkinen","thierry boutsen"],
+        "Gran Premio de Brasil":          ["nigel mansell","riccardo patrese","michael schumacher","ayrton senna","jean alesi","ivan capelli","martin brundle","mika hakkinen","thierry boutsen","andrea de cesaris"],
+        "Gran Premio de España":          ["nigel mansell","michael schumacher","jean alesi","mika hakkinen","ayrton senna","riccardo patrese","gerhard berger","martin brundle","ivan capelli","andrea de cesaris"],
+        "Gran Premio de San Marino":      ["nigel mansell","riccardo patrese","ayrton senna","gerhard berger","martin brundle","jean alesi","mika hakkinen","thierry boutsen","ivan capelli","pierluigi martini"],
+        "Gran Premio de Mónaco":          ["ayrton senna","nigel mansell","riccardo patrese","michael schumacher","jean alesi","gerhard berger","martin brundle","mika hakkinen","paul belmondo","thierry boutsen"],
+        "Gran Premio de Canadá":          ["gerhard berger","michael schumacher","jean alesi","ayrton senna","karl wendlinger","thierry boutsen","riccardo patrese","martin brundle","bertrand gachot","andrea de cesaris"],
+        "Gran Premio de Francia":         ["nigel mansell","riccardo patrese","martin brundle","ayrton senna","mika hakkinen","gerhard berger","jean alesi","thierry boutsen","andrea de cesaris","ivan capelli"],
+        "Gran Premio de Gran Bretaña":    ["nigel mansell","riccardo patrese","martin brundle","michael schumacher","gerhard berger","ayrton senna","mika hakkinen","thierry boutsen","bertrand gachot","jean alesi"],
+        "Gran Premio de Alemania":        ["nigel mansell","ayrton senna","michael schumacher","riccardo patrese","jean alesi","martin brundle","mika hakkinen","thierry boutsen","ivan capelli","andrea de cesaris"],
+        "Gran Premio de Hungría":         ["ayrton senna","nigel mansell","gerhard berger","michael schumacher","martin brundle","jean alesi","thierry boutsen","johnny herbert","bertrand gachot","ivan capelli"],
+        "Gran Premio de Bélgica":         ["michael schumacher","nigel mansell","riccardo patrese","ayrton senna","martin brundle","gerhard berger","mika hakkinen","erik comas","thierry boutsen","jean alesi"],
+        "Gran Premio de Italia":          ["ayrton senna","martin brundle","michael schumacher","gerhard berger","mika hakkinen","riccardo patrese","jean alesi","ivan capelli","thierry boutsen","andrea de cesaris"],
+        "Gran Premio de Portugal":        ["nigel mansell","gerhard berger","ayrton senna","riccardo patrese","martin brundle","jean alesi","michael schumacher","thierry boutsen","mika hakkinen","ivan capelli"],
+        "Gran Premio de Japón":           ["riccardo patrese","gerhard berger","martin brundle","ayrton senna","mika hakkinen","michael schumacher","thierry boutsen","andrea de cesaris","bertrand gachot","pierluigi martini"],
+        "Gran Premio de Australia":       ["gerhard berger","michael schumacher","martin brundle","mark blundell","thierry boutsen","mika hakkinen","jean alesi","j.j. lehto","riccardo patrese","olivier grouillard"],
     },
     1993: {
-        "Gran Premio de Gran Bretaña": ["alain prost","michael schumacher","mark blundell","riccardo patrese","johnny herbert","martin brundle","rubens barrichello","derek warwick","christian fittipaldi","aguri suzuki"],
-        "Gran Premio de Mónaco":       ["ayrton senna","damon hill","jean alesi","michael andretti","martin brundle","johnny herbert","mark blundell","derek warwick","christian fittipaldi","philippe alliot"],
-        "Gran Premio de Europa":       ["ayrton senna","alain prost","damon hill","michael schumacher","jean alesi","karl wendlinger","mika hakkinen","rubens barrichello","derek warwick","christian fittipaldi"],
+        "Gran Premio de Sudáfrica":       ["alain prost","ayrton senna","mark blundell","michael schumacher","riccardo patrese","gerhard berger","johnny herbert","karl wendlinger","derek warwick","martin brundle"],
+        "Gran Premio de Brasil":          ["ayrton senna","damon hill","mark blundell","michael schumacher","gerhard berger","johnny herbert","fabrizio barbazza","derek warwick","thierry boutsen","christian fittipaldi"],
+        "Gran Premio de San Marino":      ["alain prost","michael schumacher","martin brundle","gerhard berger","johnny herbert","jean alesi","fabrizio barbazza","rubens barrichello","thierry boutsen","derek warwick"],
+        "Gran Premio de España":          ["alain prost","ayrton senna","michael schumacher","damon hill","gerhard berger","jean alesi","johnny herbert","riccardo patrese","karl wendlinger","martin brundle"],
+        "Gran Premio de Mónaco":          ["ayrton senna","damon hill","jean alesi","michael andretti","martin brundle","johnny herbert","mark blundell","derek warwick","christian fittipaldi","philippe alliot"],
+        "Gran Premio de Canadá":          ["alain prost","michael schumacher","damon hill","gerhard berger","martin brundle","mark blundell","derek warwick","christian fittipaldi","jean alesi","johnny herbert"],
+        "Gran Premio de Francia":         ["alain prost","damon hill","michael schumacher","gerhard berger","martin brundle","jean alesi","mark blundell","johnny herbert","rubens barrichello","derek warwick"],
+        "Gran Premio de Gran Bretaña":    ["alain prost","michael schumacher","mark blundell","riccardo patrese","johnny herbert","martin brundle","rubens barrichello","derek warwick","christian fittipaldi","aguri suzuki"],
+        "Gran Premio de Alemania":        ["alain prost","michael schumacher","mark blundell","damon hill","gerhard berger","jean alesi","karl wendlinger","johnny herbert","martin brundle","thierry boutsen"],
+        "Gran Premio de Hungría":         ["damon hill","riccardo patrese","gerhard berger","derek warwick","mark blundell","thierry boutsen","aguri suzuki","jean alesi","christian fittipaldi","eddie irvine"],
+        "Gran Premio de Bélgica":         ["damon hill","michael schumacher","alain prost","jean alesi","gerhard berger","riccardo patrese","martin brundle","johnny herbert","mika hakkinen","rubens barrichello"],
+        "Gran Premio de Italia":          ["damon hill","michael schumacher","martin brundle","jean alesi","gerhard berger","riccardo patrese","derek warwick","christian fittipaldi","rubens barrichello","thierry boutsen"],
+        "Gran Premio de Portugal":        ["michael schumacher","alain prost","damon hill","gerhard berger","jean alesi","martin brundle","mark blundell","johnny herbert","riccardo patrese","derek warwick"],
+        "Gran Premio de Europa":          ["ayrton senna","alain prost","damon hill","michael schumacher","jean alesi","karl wendlinger","mika hakkinen","rubens barrichello","derek warwick","christian fittipaldi"],
+        "Gran Premio de Japón":           ["ayrton senna","alain prost","mika hakkinen","damon hill","gerhard berger","johnny herbert","derek warwick","eddie irvine","aguri suzuki","michael andretti"],
+        "Gran Premio de Australia":       ["ayrton senna","alain prost","damon hill","mika hakkinen","gerhard berger","jean alesi","riccardo patrese","johnny herbert","thierry boutsen","christian fittipaldi"],
     },
     1994: {
-        "Gran Premio de Gran Bretaña": ["damon hill","michael schumacher","mika hakkinen","jos verstappen","martin brundle","david coulthard","olivier panis","christian fittipaldi","rubens barrichello","eric bernard"],
-        "Gran Premio de Hungría":      ["michael schumacher","damon hill","jos verstappen","martin brundle","olivier panis","eric bernard","andrea montermini","mika salo","david coulthard","heinz-harold frentzen"],
-        "Gran Premio de Australia":    ["nigel mansell","gerhard berger","martin brundle","rubens barrichello","mika hakkinen","olivier panis","gianni morbidelli","damon hill","aguri suzuki","david coulthard"],
+        "Gran Premio de Brasil":          ["michael schumacher","damon hill","jean alesi","rubens barrichello","mika hakkinen","nicola larini","eric bernard","olivier panis","gianni morbidelli","andrea de cesaris"],
+        "Gran Premio del Pacífico":       ["michael schumacher","gerhard berger","rubens barrichello","christian fittipaldi","heinz-harold frentzen","olivier panis","eric bernard","gianni morbidelli","pierluigi martini","andrea de cesaris"],
+        "Gran Premio de San Marino":      ["michael schumacher","nicola larini","mika hakkinen","damon hill","rubens barrichello","andrea de cesaris","eric bernard","olivier panis","gianni morbidelli","andrea montermini"],
+        "Gran Premio de Mónaco":          ["michael schumacher","martin brundle","gerhard berger","andrea de cesaris","rubens barrichello","damon hill","olivier panis","mika hakkinen","eric bernard","heinz-harold frentzen"],
+        "Gran Premio de España":          ["damon hill","michael schumacher","mark blundell","gerhard berger","jean alesi","rubens barrichello","david coulthard","pierluigi martini","heinz-harold frentzen","mika salo"],
+        "Gran Premio de Canadá":          ["michael schumacher","damon hill","jean alesi","rubens barrichello","david coulthard","olivier panis","heinz-harold frentzen","bertrand gachot","eric bernard","pierluigi martini"],
+        "Gran Premio de Francia":         ["michael schumacher","damon hill","gerhard berger","martin brundle","rubens barrichello","olivier panis","mika hakkinen","david coulthard","jean alesi","heinz-harold frentzen"],
+        "Gran Premio de Gran Bretaña":    ["damon hill","michael schumacher","mika hakkinen","jos verstappen","martin brundle","david coulthard","olivier panis","christian fittipaldi","rubens barrichello","eric bernard"],
+        "Gran Premio de Alemania":        ["gerhard berger","olivier panis","eric bernard","heinz-harold frentzen","christian fittipaldi","mika hakkinen","damon hill","rubens barrichello","pierluigi martini","jan magnussen"],
+        "Gran Premio de Hungría":         ["michael schumacher","damon hill","jos verstappen","martin brundle","olivier panis","eric bernard","andrea montermini","mika salo","david coulthard","heinz-harold frentzen"],
+        "Gran Premio de Bélgica":         ["damon hill","mika hakkinen","jos verstappen","david coulthard","rubens barrichello","jean alesi","olivier panis","heinz-harold frentzen","martin brundle","eric bernard"],
+        "Gran Premio de Italia":          ["damon hill","gerhard berger","mika hakkinen","david coulthard","martin brundle","olivier panis","jean alesi","heinz-harold frentzen","pierluigi martini","eric bernard"],
+        "Gran Premio de Portugal":        ["damon hill","david coulthard","mika hakkinen","gerhard berger","martin brundle","olivier panis","jean alesi","rubens barrichello","heinz-harold frentzen","christian fittipaldi"],
+        "Gran Premio de Europa":          ["michael schumacher","damon hill","mika hakkinen","gerhard berger","rubens barrichello","martin brundle","olivier panis","nicola larini","heinz-harold frentzen","andrea de cesaris"],
+        "Gran Premio de Japón":           ["damon hill","michael schumacher","jean alesi","mika hakkinen","rubens barrichello","nigel mansell","olivier panis","heinz-harold frentzen","christian fittipaldi","andrea de cesaris"],
+        "Gran Premio de Australia":       ["nigel mansell","gerhard berger","martin brundle","rubens barrichello","mika hakkinen","olivier panis","gianni morbidelli","damon hill","aguri suzuki","david coulthard"],
     },
     1995: {
-        "Gran Premio de Gran Bretaña": ["johnny herbert","jean alesi","damon hill","olivier panis","mika hakkinen","gerhard berger","rubens barrichello","mark blundell","karl wendlinger","mika salo"],
-        "Gran Premio de Mónaco":       ["michael schumacher","damon hill","gerhard berger","jean alesi","johnny herbert","heinz-harold frentzen","mika hakkinen","olivier panis","mark blundell","mika salo"],
-        "Gran Premio de Italia":       ["johnny herbert","mika hakkinen","heinz-harold frentzen","martin brundle","gerhard berger","jean alesi","rubens barrichello","olivier panis","gianni morbidelli","andrea montermini"],
+        "Gran Premio de Brasil":          ["michael schumacher","david coulthard","rubens barrichello","jean alesi","mika hakkinen","damon hill","johnny herbert","heinz-harold frentzen","olivier panis","pedro lamy"],
+        "Gran Premio de Argentina":       ["damon hill","jean alesi","michael schumacher","rubens barrichello","mika hakkinen","heinz-harold frentzen","david coulthard","olivier panis","mark blundell","pierluigi martini"],
+        "Gran Premio de San Marino":      ["damon hill","jean alesi","gerhard berger","michael schumacher","johnny herbert","rubens barrichello","heinz-harold frentzen","olivier panis","mika hakkinen","pierluigi martini"],
+        "Gran Premio de España":          ["michael schumacher","johnny herbert","gerhard berger","rubens barrichello","mika hakkinen","olivier panis","jean alesi","damon hill","heinz-harold frentzen","pierluigi martini"],
+        "Gran Premio de Mónaco":          ["michael schumacher","damon hill","gerhard berger","jean alesi","johnny herbert","heinz-harold frentzen","mika hakkinen","olivier panis","mark blundell","mika salo"],
+        "Gran Premio de Canadá":          ["jean alesi","rubens barrichello","eddie irvine","olivier panis","mika hakkinen","heinz-harold frentzen","damon hill","michael schumacher","mark blundell","pierluigi martini"],
+        "Gran Premio de Francia":         ["michael schumacher","damon hill","gerhard berger","rubens barrichello","johnny herbert","mika hakkinen","olivier panis","heinz-harold frentzen","jean alesi","mark blundell"],
+        "Gran Premio de Gran Bretaña":    ["johnny herbert","jean alesi","damon hill","olivier panis","mika hakkinen","gerhard berger","rubens barrichello","mark blundell","karl wendlinger","mika salo"],
+        "Gran Premio de Alemania":        ["michael schumacher","damon hill","gerhard berger","jean alesi","david coulthard","johnny herbert","olivier panis","mika hakkinen","heinz-harold frentzen","mark blundell"],
+        "Gran Premio de Hungría":         ["damon hill","david coulthard","gerhard berger","michael schumacher","rubens barrichello","johnny herbert","mika hakkinen","heinz-harold frentzen","jean alesi","olivier panis"],
+        "Gran Premio de Bélgica":         ["michael schumacher","damon hill","martin brundle","gerhard berger","jean alesi","rubens barrichello","olivier panis","mark blundell","heinz-harold frentzen","johnny herbert"],
+        "Gran Premio de Italia":          ["johnny herbert","mika hakkinen","heinz-harold frentzen","martin brundle","gerhard berger","jean alesi","rubens barrichello","olivier panis","gianni morbidelli","andrea montermini"],
+        "Gran Premio de Portugal":        ["david coulthard","michael schumacher","mika hakkinen","damon hill","gerhard berger","jean alesi","heinz-harold frentzen","olivier panis","johnny herbert","rubens barrichello"],
+        "Gran Premio de Europa":          ["michael schumacher","damon hill","gerhard berger","jean alesi","mika hakkinen","olivier panis","rubens barrichello","johnny herbert","martin brundle","heinz-harold frentzen"],
+        "Gran Premio del Pacífico":       ["michael schumacher","damon hill","rubens barrichello","jean alesi","gerhard berger","mika hakkinen","johnny herbert","heinz-harold frentzen","olivier panis","martin brundle"],
+        "Gran Premio de Japón":           ["michael schumacher","mika hakkinen","damon hill","gerhard berger","johnny herbert","martin brundle","jean alesi","heinz-harold frentzen","olivier panis","rubens barrichello"],
+        "Gran Premio de Australia":       ["damon hill","olivier panis","gianni morbidelli","rubens barrichello","mika hakkinen","gerhard berger","jean alesi","martin brundle","heinz-harold frentzen","michael schumacher"],
     },
     1996: {
-        "Gran Premio de Gran Bretaña": ["jacques villeneuve","gerhard berger","mika hakkinen","damon hill","david coulthard","rubens barrichello","eddie irvine","martin brundle","heinz-harold frentzen","jos verstappen"],
-        "Gran Premio de Mónaco":       ["olivier panis","david coulthard","johnny herbert","heinz-harold frentzen","mika salo","michael schumacher","rubens barrichello","pedro diniz","mika hakkinen","jarno trulli"],
-        "Gran Premio de Japón":        ["damon hill","michael schumacher","mika hakkinen","gerhard berger","mika salo","johnny herbert","rubens barrichello","eddie irvine","martin brundle","olivier panis"],
+        "Gran Premio de Australia":       ["damon hill","olivier panis","eddie irvine","gerhard berger","mika hakkinen","rubens barrichello","martin brundle","mika salo","johnny herbert","heinz-harold frentzen"],
+        "Gran Premio de Brasil":          ["damon hill","jean alesi","michael schumacher","gerhard berger","rubens barrichello","olivier panis","mika hakkinen","mika salo","martin brundle","johnny herbert"],
+        "Gran Premio de Argentina":       ["damon hill","jean alesi","michael schumacher","gerhard berger","rubens barrichello","eddie irvine","martin brundle","mika salo","johnny herbert","olivier panis"],
+        "Gran Premio de Europa":          ["jacques villeneuve","michael schumacher","mika hakkinen","rubens barrichello","heinz-harold frentzen","mika salo","johnny herbert","martin brundle","oliver panis","pedro diniz"],
+        "Gran Premio de San Marino":      ["damon hill","michael schumacher","gerhard berger","david coulthard","rubens barrichello","eddie irvine","mika hakkinen","heinz-harold frentzen","mika salo","olivier panis"],
+        "Gran Premio de Mónaco":          ["olivier panis","david coulthard","johnny herbert","heinz-harold frentzen","mika salo","michael schumacher","rubens barrichello","pedro diniz","mika hakkinen","jarno trulli"],
+        "Gran Premio de España":          ["michael schumacher","jean alesi","damon hill","rubens barrichello","mika hakkinen","gerhard berger","david coulthard","heinz-harold frentzen","mika salo","olivier panis"],
+        "Gran Premio de Canadá":          ["damon hill","jean alesi","martin brundle","david coulthard","gerhard berger","mika hakkinen","mika salo","rubens barrichello","heinz-harold frentzen","pedro diniz"],
+        "Gran Premio de Francia":         ["damon hill","jean alesi","michael schumacher","gerhard berger","mika hakkinen","rubens barrichello","david coulthard","heinz-harold frentzen","martin brundle","mika salo"],
+        "Gran Premio de Gran Bretaña":    ["jacques villeneuve","gerhard berger","mika hakkinen","damon hill","david coulthard","rubens barrichello","eddie irvine","martin brundle","heinz-harold frentzen","jos verstappen"],
+        "Gran Premio de Alemania":        ["damon hill","jean alesi","michael schumacher","gerhard berger","mika hakkinen","david coulthard","rubens barrichello","heinz-harold frentzen","olivier panis","mika salo"],
+        "Gran Premio de Hungría":         ["jacques villeneuve","damon hill","jean alesi","michael schumacher","mika hakkinen","martin brundle","rubens barrichello","heinz-harold frentzen","david coulthard","mika salo"],
+        "Gran Premio de Bélgica":         ["michael schumacher","jacques villeneuve","mika hakkinen","jean alesi","gerhard berger","rubens barrichello","martin brundle","olivier panis","pedro diniz","mika salo"],
+        "Gran Premio de Italia":          ["michael schumacher","jean alesi","mika hakkinen","damon hill","gerhard berger","david coulthard","rubens barrichello","martin brundle","mika salo","heinz-harold frentzen"],
+        "Gran Premio de Portugal":        ["jacques villeneuve","damon hill","michael schumacher","jean alesi","mika hakkinen","david coulthard","gerhard berger","rubens barrichello","mika salo","heinz-harold frentzen"],
+        "Gran Premio de Japón":           ["damon hill","michael schumacher","mika hakkinen","gerhard berger","mika salo","johnny herbert","rubens barrichello","eddie irvine","martin brundle","olivier panis"],
     },
     1997: {
-        "Gran Premio de Mónaco":       ["michael schumacher","rubens barrichello","heinz-harold frentzen","eddie irvine","olivier panis","mika salo","jarno trulli","ralf schumacher","mika hakkinen","pedro diniz"],
-        "Gran Premio de Gran Bretaña": ["michael schumacher","mika hakkinen","heinz-harold frentzen","gerhard berger","david coulthard","alexander wurz","ralf schumacher","jarno trulli","rubens barrichello","eddie irvine"],
-        "Gran Premio de Hungría":      ["jacques villeneuve","damon hill","johnny herbert","ralf schumacher","michael schumacher","heinz-harold frentzen","mika hakkinen","rubens barrichello","shinji nakano","mika salo"],
+        "Gran Premio de Australia":       ["david coulthard","michael schumacher","mika hakkinen","eddie irvine","heinz-harold frentzen","ralf schumacher","damon hill","johnny herbert","mika salo","shinji nakano"],
+        "Gran Premio de Brasil":          ["jacques villeneuve","gerhard berger","olivier panis","heinz-harold frentzen","johnny herbert","mika salo","ralf schumacher","pedro diniz","jarno trulli","ukyo katayama"],
+        "Gran Premio de Argentina":       ["david coulthard","rubens barrichello","eddie irvine","ralf schumacher","mika hakkinen","shinji nakano","heinz-harold frentzen","giancarlo fisichella","damon hill","mika salo"],
+        "Gran Premio de San Marino":      ["heinz-harold frentzen","michael schumacher","eddie irvine","mika hakkinen","ralf schumacher","giancarlo fisichella","jarno trulli","damon hill","mika salo","shinji nakano"],
+        "Gran Premio de Mónaco":          ["michael schumacher","rubens barrichello","heinz-harold frentzen","eddie irvine","olivier panis","mika salo","jarno trulli","ralf schumacher","mika hakkinen","pedro diniz"],
+        "Gran Premio de España":          ["jacques villeneuve","olivier panis","jean alesi","heinz-harold frentzen","johnny herbert","ralf schumacher","mika hakkinen","damon hill","giancarlo fisichella","mika salo"],
+        "Gran Premio de Canadá":          ["michael schumacher","jean alesi","heinz-harold frentzen","giancarlo fisichella","eddie irvine","olivier panis","johnny herbert","mika hakkinen","ralf schumacher","pedro diniz"],
+        "Gran Premio de Francia":         ["michael schumacher","heinz-harold frentzen","eddie irvine","mika hakkinen","ralf schumacher","giancarlo fisichella","damon hill","olivier panis","johnny herbert","rubens barrichello"],
+        "Gran Premio de Gran Bretaña":    ["michael schumacher","mika hakkinen","heinz-harold frentzen","gerhard berger","david coulthard","alexander wurz","ralf schumacher","jarno trulli","rubens barrichello","eddie irvine"],
+        "Gran Premio de Alemania":        ["gerhard berger","mika hakkinen","david coulthard","heinz-harold frentzen","olivier panis","damon hill","rubens barrichello","mika salo","ralf schumacher","shinji nakano"],
+        "Gran Premio de Hungría":         ["jacques villeneuve","damon hill","johnny herbert","ralf schumacher","michael schumacher","heinz-harold frentzen","mika hakkinen","rubens barrichello","shinji nakano","mika salo"],
+        "Gran Premio de Bélgica":         ["michael schumacher","giancarlo fisichella","heinz-harold frentzen","eddie irvine","ralf schumacher","mika hakkinen","damon hill","olivier panis","mika salo","shinji nakano"],
+        "Gran Premio de Italia":          ["david coulthard","jean alesi","heinz-harold frentzen","mika hakkinen","eddie irvine","ralf schumacher","giancarlo fisichella","jarno trulli","mika salo","shinji nakano"],
+        "Gran Premio de Austria":         ["jacques villeneuve","david coulthard","heinz-harold frentzen","eddie irvine","mika hakkinen","ralf schumacher","johnny herbert","olivier panis","mika salo","damon hill"],
+        "Gran Premio de Luxemburgo":      ["mika hakkinen","michael schumacher","jacques villeneuve","heinz-harold frentzen","ralf schumacher","damon hill","giancarlo fisichella","jarno trulli","olivier panis","rubens barrichello"],
+        "Gran Premio de Japón":           ["michael schumacher","heinz-harold frentzen","eddie irvine","mika hakkinen","ralf schumacher","damon hill","olivier panis","giancarlo fisichella","shinji nakano","pedro diniz"],
+        "Gran Premio de Europa":          ["mika hakkinen","david coulthard","michael schumacher","heinz-harold frentzen","eddie irvine","mika salo","ralf schumacher","giancarlo fisichella","jarno trulli","olivier panis"],
     },
     1998: {
-        "Gran Premio de Gran Bretaña": ["michael schumacher","mika hakkinen","eddie irvine","alexander wurz","damon hill","david coulthard","ralf schumacher","mika salo","heinz-harold frentzen","rubens barrichello"],
-        "Gran Premio de Mónaco":       ["mika hakkinen","giancarlo fisichella","eddie irvine","mika salo","heinz-harold frentzen","damon hill","pedro diniz","jos verstappen","olivier panis","ralf schumacher"],
-        "Gran Premio de Hungría":      ["michael schumacher","david coulthard","jacques villeneuve","damon hill","ralf schumacher","heinz-harold frentzen","giancarlo fisichella","alexander wurz","olivier panis","pedro diniz"],
-        "Gran Premio de Japón":        ["mika hakkinen","eddie irvine","david coulthard","damon hill","heinz-harold frentzen","michael schumacher","rubens barrichello","jan magnussen","ralf schumacher","shinji nakano"],
+        "Gran Premio de Australia":       ["mika hakkinen","david coulthard","heinz-harold frentzen","eddie irvine","giancarlo fisichella","ralf schumacher","johnny herbert","mika salo","jarno trulli","olivier panis"],
+        "Gran Premio de Brasil":          ["mika hakkinen","david coulthard","michael schumacher","alexander wurz","ralf schumacher","heinz-harold frentzen","giancarlo fisichella","johnny herbert","rubens barrichello","damon hill"],
+        "Gran Premio de Argentina":       ["michael schumacher","mika hakkinen","eddie irvine","alexander wurz","ralf schumacher","giancarlo fisichella","johnny herbert","damon hill","rubens barrichello","mika salo"],
+        "Gran Premio de San Marino":      ["david coulthard","michael schumacher","eddie irvine","mika hakkinen","giancarlo fisichella","ralf schumacher","jean alesi","heinz-harold frentzen","damon hill","mika salo"],
+        "Gran Premio de España":          ["mika hakkinen","david coulthard","michael schumacher","giancarlo fisichella","ralf schumacher","eddie irvine","heinz-harold frentzen","damon hill","rubens barrichello","mika salo"],
+        "Gran Premio de Mónaco":          ["mika hakkinen","giancarlo fisichella","eddie irvine","mika salo","heinz-harold frentzen","damon hill","pedro diniz","jos verstappen","olivier panis","ralf schumacher"],
+        "Gran Premio de Canadá":          ["michael schumacher","giancarlo fisichella","eddie irvine","ralf schumacher","alexander wurz","damon hill","jean alesi","rubens barrichello","heinz-harold frentzen","mika salo"],
+        "Gran Premio de Francia":         ["michael schumacher","eddie irvine","mika hakkinen","david coulthard","damon hill","giancarlo fisichella","olivier panis","ralf schumacher","heinz-harold frentzen","johnny herbert"],
+        "Gran Premio de Gran Bretaña":    ["michael schumacher","mika hakkinen","eddie irvine","alexander wurz","damon hill","david coulthard","ralf schumacher","mika salo","heinz-harold frentzen","rubens barrichello"],
+        "Gran Premio de Austria":         ["mika hakkinen","david coulthard","michael schumacher","eddie irvine","giancarlo fisichella","ralf schumacher","heinz-harold frentzen","damon hill","olivier panis","jean alesi"],
+        "Gran Premio de Alemania":        ["mika hakkinen","david coulthard","giancarlo fisichella","eddie irvine","jean alesi","ralf schumacher","damon hill","mika salo","heinz-harold frentzen","rubens barrichello"],
+        "Gran Premio de Hungría":         ["michael schumacher","david coulthard","jacques villeneuve","damon hill","ralf schumacher","heinz-harold frentzen","giancarlo fisichella","alexander wurz","olivier panis","pedro diniz"],
+        "Gran Premio de Bélgica":         ["damon hill","ralf schumacher","jean alesi","michael schumacher","eddie irvine","mika hakkinen","giancarlo fisichella","david coulthard","heinz-harold frentzen","rubens barrichello"],
+        "Gran Premio de Italia":          ["michael schumacher","eddie irvine","ralf schumacher","damon hill","mika hakkinen","giancarlo fisichella","heinz-harold frentzen","david coulthard","jean alesi","rubens barrichello"],
+        "Gran Premio de Luxemburgo":      ["mika hakkinen","michael schumacher","david coulthard","eddie irvine","ralf schumacher","heinz-harold frentzen","giancarlo fisichella","jean alesi","damon hill","olivier panis"],
+        "Gran Premio de Japón":           ["mika hakkinen","eddie irvine","david coulthard","damon hill","heinz-harold frentzen","michael schumacher","rubens barrichello","jan magnussen","ralf schumacher","shinji nakano"],
     },
     1999: {
-        "Gran Premio de Mónaco":       ["michael schumacher","eddie irvine","mika hakkinen","heinz-harold frentzen","ralf schumacher","giancarlo fisichella","alexander wurz","damon hill","pedro diniz","jarno trulli"],
-        "Gran Premio de Gran Bretaña": ["david coulthard","eddie irvine","ralf schumacher","heinz-harold frentzen","damon hill","mika salo","jarno trulli","alexander wurz","olivier panis","pedro diniz"],
-        "Gran Premio de Japón":        ["mika hakkinen","michael schumacher","eddie irvine","heinz-harold frentzen","ralf schumacher","johnny herbert","giancarlo fisichella","rubens barrichello","mika salo","alex zanardi"],
+        "Gran Premio de Australia":       ["eddie irvine","heinz-harold frentzen","mika hakkinen","ralf schumacher","giancarlo fisichella","damon hill","rubens barrichello","olivier panis","pedro diniz","pedro de la rosa"],
+        "Gran Premio de Brasil":          ["mika hakkinen","eddie irvine","heinz-harold frentzen","ralf schumacher","giancarlo fisichella","johnny herbert","damon hill","rubens barrichello","mika salo","olivier panis"],
+        "Gran Premio de San Marino":      ["michael schumacher","david coulthard","ralf schumacher","rubens barrichello","giancarlo fisichella","damon hill","olivier panis","mika salo","pedro diniz","jarno trulli"],
+        "Gran Premio de Mónaco":          ["michael schumacher","eddie irvine","mika hakkinen","heinz-harold frentzen","ralf schumacher","giancarlo fisichella","alexander wurz","damon hill","pedro diniz","jarno trulli"],
+        "Gran Premio de España":          ["mika hakkinen","david coulthard","michael schumacher","ralf schumacher","heinz-harold frentzen","giancarlo fisichella","rubens barrichello","damon hill","jarno trulli","olivier panis"],
+        "Gran Premio de Canadá":          ["mika hakkinen","giancarlo fisichella","michael schumacher","heinz-harold frentzen","damon hill","ralf schumacher","rubens barrichello","david coulthard","olivier panis","pedro diniz"],
+        "Gran Premio de Francia":         ["heinz-harold frentzen","rubens barrichello","mika hakkinen","ralf schumacher","giancarlo fisichella","david coulthard","damon hill","mika salo","olivier panis","jarno trulli"],
+        "Gran Premio de Gran Bretaña":    ["david coulthard","eddie irvine","ralf schumacher","heinz-harold frentzen","damon hill","mika salo","jarno trulli","alexander wurz","olivier panis","pedro diniz"],
+        "Gran Premio de Austria":         ["eddie irvine","david coulthard","mika hakkinen","ralf schumacher","giancarlo fisichella","heinz-harold frentzen","mika salo","damon hill","olivier panis","jarno trulli"],
+        "Gran Premio de Alemania":        ["eddie irvine","mika hakkinen","david coulthard","ralf schumacher","heinz-harold frentzen","rubens barrichello","giancarlo fisichella","jarno trulli","olivier panis","pedro de la rosa"],
+        "Gran Premio de Hungría":         ["mika hakkinen","damon hill","david coulthard","ralf schumacher","rubens barrichello","giancarlo fisichella","heinz-harold frentzen","olivier panis","pedro diniz","jarno trulli"],
+        "Gran Premio de Bélgica":         ["david coulthard","mika hakkinen","heinz-harold frentzen","ralf schumacher","giancarlo fisichella","jarno trulli","rubens barrichello","damon hill","olivier panis","pedro de la rosa"],
+        "Gran Premio de Italia":          ["heinz-harold frentzen","ralf schumacher","mika salo","rubens barrichello","david coulthard","giancarlo fisichella","damon hill","olivier panis","pedro de la rosa","alexander wurz"],
+        "Gran Premio de Europa":          ["johnny herbert","rubens barrichello","mika hakkinen","ralf schumacher","giancarlo fisichella","mika salo","pedro de la rosa","damon hill","heinz-harold frentzen","jarno trulli"],
+        "Gran Premio de Malasia":         ["eddie irvine","michael schumacher","mika hakkinen","david coulthard","heinz-harold frentzen","ralf schumacher","giancarlo fisichella","rubens barrichello","jarno trulli","damon hill"],
+        "Gran Premio de Japón":           ["mika hakkinen","michael schumacher","eddie irvine","heinz-harold frentzen","ralf schumacher","johnny herbert","giancarlo fisichella","rubens barrichello","mika salo","alex zanardi"],
     },
     2000: {
-        "Gran Premio de Mónaco":       ["david coulthard","rubens barrichello","giancarlo fisichella","michael schumacher","eddie irvine","jenson button","mika salo","heinz-harold frentzen","nick heidfeld","tarso marques"],
-        "Gran Premio de Gran Bretaña": ["david coulthard","michael schumacher","rubens barrichello","mika hakkinen","heinz-harold frentzen","jenson button","ralf schumacher","eddie irvine","giancarlo fisichella","pedro diniz"],
-        "Gran Premio de Italia":       ["michael schumacher","mika hakkinen","ralf schumacher","rubens barrichello","jenson button","heinz-harold frentzen","eddie irvine","giancarlo fisichella","mika salo","pedro diniz"],
-        "Gran Premio de Japón":        ["michael schumacher","mika hakkinen","david coulthard","rubens barrichello","ralf schumacher","giancarlo fisichella","jenson button","nick heidfeld","heinz-harold frentzen","eddie irvine"],
+        "Gran Premio de Australia":       ["michael schumacher","rubens barrichello","ralf schumacher","heinz-harold frentzen","jenson button","giancarlo fisichella","mika hakkinen","david coulthard","pedro diniz","nick heidfeld"],
+        "Gran Premio de Brasil":          ["michael schumacher","giancarlo fisichella","rubens barrichello","ralf schumacher","mika hakkinen","heinz-harold frentzen","jenson button","eddie irvine","david coulthard","pedro diniz"],
+        "Gran Premio de San Marino":      ["michael schumacher","david coulthard","rubens barrichello","mika hakkinen","heinz-harold frentzen","ralf schumacher","jenson button","giancarlo fisichella","jarno trulli","nick heidfeld"],
+        "Gran Premio de Gran Bretaña":    ["david coulthard","michael schumacher","rubens barrichello","mika hakkinen","heinz-harold frentzen","jenson button","ralf schumacher","eddie irvine","giancarlo fisichella","pedro diniz"],
+        "Gran Premio de España":          ["mika hakkinen","michael schumacher","david coulthard","ralf schumacher","rubens barrichello","giancarlo fisichella","jenson button","heinz-harold frentzen","jarno trulli","nick heidfeld"],
+        "Gran Premio de Europa":          ["michael schumacher","mika hakkinen","rubens barrichello","david coulthard","giancarlo fisichella","jenson button","ralf schumacher","heinz-harold frentzen","nick heidfeld","pedro diniz"],
+        "Gran Premio de Mónaco":          ["david coulthard","rubens barrichello","giancarlo fisichella","michael schumacher","eddie irvine","jenson button","mika salo","heinz-harold frentzen","nick heidfeld","tarso marques"],
+        "Gran Premio de Canadá":          ["michael schumacher","rubens barrichello","giancarlo fisichella","mika hakkinen","ralf schumacher","heinz-harold frentzen","jenson button","jarno trulli","david coulthard","eddie irvine"],
+        "Gran Premio de Francia":         ["david coulthard","mika hakkinen","rubens barrichello","michael schumacher","ralf schumacher","giancarlo fisichella","heinz-harold frentzen","jenson button","jarno trulli","nick heidfeld"],
+        "Gran Premio de Austria":         ["mika hakkinen","david coulthard","rubens barrichello","michael schumacher","giancarlo fisichella","ralf schumacher","heinz-harold frentzen","jenson button","nick heidfeld","jarno trulli"],
+        "Gran Premio de Alemania":        ["rubens barrichello","mika hakkinen","david coulthard","jenson button","giancarlo fisichella","ralf schumacher","heinz-harold frentzen","jarno trulli","nick heidfeld","pedro diniz"],
+        "Gran Premio de Hungría":         ["mika hakkinen","michael schumacher","david coulthard","rubens barrichello","ralf schumacher","giancarlo fisichella","jenson button","heinz-harold frentzen","nick heidfeld","jarno trulli"],
+        "Gran Premio de Bélgica":         ["mika hakkinen","michael schumacher","ralf schumacher","david coulthard","rubens barrichello","giancarlo fisichella","jenson button","heinz-harold frentzen","jarno trulli","pedro diniz"],
+        "Gran Premio de Italia":          ["michael schumacher","mika hakkinen","ralf schumacher","rubens barrichello","jenson button","heinz-harold frentzen","eddie irvine","giancarlo fisichella","mika salo","pedro diniz"],
+        "Gran Premio de Estados Unidos":  ["michael schumacher","rubens barrichello","heinz-harold frentzen","david coulthard","giancarlo fisichella","ralf schumacher","mika hakkinen","nick heidfeld","jenson button","pedro diniz"],
+        "Gran Premio de Japón":           ["michael schumacher","mika hakkinen","david coulthard","rubens barrichello","ralf schumacher","giancarlo fisichella","jenson button","nick heidfeld","heinz-harold frentzen","eddie irvine"],
+        "Gran Premio de Malasia":         ["michael schumacher","rubens barrichello","david coulthard","mika hakkinen","giancarlo fisichella","ralf schumacher","heinz-harold frentzen","jenson button","jarno trulli","pedro diniz"],
     },
     2001: {
-        "Gran Premio de Mónaco":       ["michael schumacher","david coulthard","rubens barrichello","eddie irvine","jarno trulli","jenson button","ralf schumacher","olivier panis","jean alesi","heinz-harold frentzen"],
-        "Gran Premio de Gran Bretaña": ["mika hakkinen","michael schumacher","rubens barrichello","ralf schumacher","david coulthard","jarno trulli","mika salo","olivier panis","jean alesi","nick heidfeld"],
-        "Gran Premio de Hungría":      ["michael schumacher","rubens barrichello","david coulthard","ralf schumacher","mika hakkinen","olivier panis","jean alesi","jenson button","jarno trulli","kimi raikkonen"],
+        "Gran Premio de Australia": ["michael schumacher","david coulthard","rubens barrichello","nick heidfeld","kimi raikkonen","jacques villeneuve","ralf schumacher","jarno trulli","mika hakkinen","jean alesi"],
+        "Gran Premio de Malasia": ["michael schumacher","rubens barrichello","david coulthard","ralf schumacher","mika hakkinen","jarno trulli","nick heidfeld","kimi raikkonen","jacques villeneuve","olivier panis"],
+        "Gran Premio de Brasil": ["david coulthard","michael schumacher","nick heidfeld","rubens barrichello","jarno trulli","juan pablo montoya","ralf schumacher","kimi raikkonen","jacques villeneuve","mika hakkinen"],
+        "Gran Premio de San Marino": ["ralf schumacher","david coulthard","rubens barrichello","michael schumacher","mika hakkinen","nick heidfeld","jarno trulli","kimi raikkonen","jean alesi","giancarlo fisichella"],
+        "Gran Premio de España": ["michael schumacher","juan pablo montoya","kimi raikkonen","ralf schumacher","mika hakkinen","jarno trulli","nick heidfeld","rubens barrichello","jenson button","olivier panis"],
+        "Gran Premio de Austria": ["david coulthard","michael schumacher","rubens barrichello","ralf schumacher","mika hakkinen","jarno trulli","nick heidfeld","kimi raikkonen","jenson button","jean alesi"],
+        "Gran Premio de Mónaco": ["michael schumacher","rubens barrichello","eddie irvine","jarno trulli","david coulthard","ralf schumacher","nick heidfeld","jenson button","kimi raikkonen","jean alesi"],
+        "Gran Premio de Canadá": ["ralf schumacher","michael schumacher","mika hakkinen","david coulthard","rubens barrichello","jarno trulli","nick heidfeld","kimi raikkonen","jenson button","jean alesi"],
+        "Gran Premio de Europa": ["michael schumacher","ralf schumacher","rubens barrichello","juan pablo montoya","david coulthard","jarno trulli","nick heidfeld","jenson button","kimi raikkonen","eddie irvine"],
+        "Gran Premio de Francia": ["michael schumacher","ralf schumacher","rubens barrichello","juan pablo montoya","david coulthard","jarno trulli","nick heidfeld","jenson button","kimi raikkonen","jean alesi"],
+        "Gran Premio de Gran Bretaña": ["mika hakkinen","michael schumacher","rubens barrichello","juan pablo montoya","ralf schumacher","david coulthard","jarno trulli","nick heidfeld","jenson button","kimi raikkonen"],
+        "Gran Premio de Alemania": ["ralf schumacher","rubens barrichello","jarno trulli","nick heidfeld","david coulthard","juan pablo montoya","michael schumacher","jenson button","kimi raikkonen","eddie irvine"],
+        "Gran Premio de Hungría": ["michael schumacher","david coulthard","rubens barrichello","ralf schumacher","mika hakkinen","nick heidfeld","jarno trulli","kimi raikkonen","jenson button","jean alesi"],
+        "Gran Premio de Bélgica": ["michael schumacher","david coulthard","giancarlo fisichella","nick heidfeld","jarno trulli","jenson button","ralf schumacher","kimi raikkonen","jean alesi","eddie irvine"],
+        "Gran Premio de Italia": ["juan pablo montoya","rubens barrichello","ralf schumacher","michael schumacher","david coulthard","jarno trulli","nick heidfeld","jenson button","kimi raikkonen","giancarlo fisichella"],
+        "Gran Premio de Estados Unidos": ["mika hakkinen","michael schumacher","david coulthard","rubens barrichello","juan pablo montoya","ralf schumacher","jarno trulli","nick heidfeld","jenson button","kimi raikkonen"],
+        "Gran Premio de Japón": ["michael schumacher","juan pablo montoya","david coulthard","rubens barrichello","ralf schumacher","mika hakkinen","jarno trulli","nick heidfeld","jenson button","kimi raikkonen"]
     },
     2002: {
-        "Gran Premio de Mónaco":       ["david coulthard","michael schumacher","ralf schumacher","jenson button","eddie irvine","rubens barrichello","jarno trulli","kimi raikkonen","nick heidfeld","olivier panis"],
-        "Gran Premio de Gran Bretaña": ["michael schumacher","rubens barrichello","juan pablo montoya","david coulthard","ralf schumacher","kimi raikkonen","nick heidfeld","jenson button","jarno trulli","felipe massa"],
-        "Gran Premio de Hungría":      ["rubens barrichello","michael schumacher","ralf schumacher","david coulthard","kimi raikkonen","jenson button","giancarlo fisichella","nick heidfeld","takuma sato","jarno trulli"],
+        "Gran Premio de Australia": ["michael schumacher","juan pablo montoya","kimi raikkonen","ralf schumacher","jarno trulli","jenson button","david coulthard","mika salo","nick heidfeld","felipe massa"],
+        "Gran Premio de Malasia": ["ralf schumacher","juan pablo montoya","michael schumacher","jacques villeneuve","olivier panis","mika salo","mark webber","jenson button","nick heidfeld","kimi raikkonen"],
+        "Gran Premio de Brasil": ["michael schumacher","ralf schumacher","david coulthard","juan pablo montoya","jenson button","jarno trulli","nick heidfeld","felipe massa","heinz harald frentzen","kimi raikkonen"],
+        "Gran Premio de San Marino": ["michael schumacher","ralf schumacher","juan pablo montoya","jenson button","david coulthard","jarno trulli","nick heidfeld","felipe massa","heinz harald frentzen","mark webber"],
+        "Gran Premio de España": ["michael schumacher","juan pablo montoya","kimi raikkonen","ralf schumacher","rubens barrichello","jenson button","david coulthard","jarno trulli","nick heidfeld","felipe massa"],
+        "Gran Premio de Austria": ["michael schumacher","rubens barrichello","juan pablo montoya","ralf schumacher","mika hakkinen","jenson button","david coulthard","jarno trulli","nick heidfeld","felipe massa"],
+        "Gran Premio de Mónaco": ["david coulthard","michael schumacher","ralf schumacher","juan pablo montoya","rubens barrichello","jarno trulli","jenson button","nick heidfeld","felipe massa","olivier panis"],
+        "Gran Premio de Canadá": ["michael schumacher","ralf schumacher","juan pablo montoya","rubens barrichello","jenson button","jarno trulli","nick heidfeld","felipe massa","david coulthard","olivier panis"],
+        "Gran Premio de Europa": ["rubens barrichello","ralf schumacher","juan pablo montoya","michael schumacher","jenson button","jarno trulli","nick heidfeld","felipe massa","david coulthard","olivier panis"],
+        "Gran Premio de Gran Bretaña": ["michael schumacher","rubens barrichello","juan pablo montoya","kimi raikkonen","ralf schumacher","jarno trulli","jenson button","david coulthard","nick heidfeld","felipe massa"],
+        "Gran Premio de Francia": ["michael schumacher","kimi raikkonen","jarno trulli","rubens barrichello","ralf schumacher","juan pablo montoya","jenson button","david coulthard","nick heidfeld","felipe massa"],
+        "Gran Premio de Alemania": ["michael schumacher","juan pablo montoya","david coulthard","ralf schumacher","rubens barrichello","jarno trulli","jenson button","nick heidfeld","felipe massa","mark webber"],
+        "Gran Premio de Hungría": ["rubens barrichello","michael schumacher","ralf schumacher","kimi raikkonen","david coulthard","juan pablo montoya","jarno trulli","jenson button","nick heidfeld","felipe massa"],
+        "Gran Premio de Bélgica": ["michael schumacher","ralf schumacher","juan pablo montoya","kimi raikkonen","rubens barrichello","jarno trulli","jenson button","david coulthard","nick heidfeld","felipe massa"],
+        "Gran Premio de Italia": ["rubens barrichello","michael schumacher","juan pablo montoya","ralf schumacher","kimi raikkonen","jarno trulli","jenson button","david coulthard","nick heidfeld","felipe massa"],
+        "Gran Premio de Estados Unidos": ["rubens barrichello","michael schumacher","ralf schumacher","juan pablo montoya","kimi raikkonen","jarno trulli","jenson button","nick heidfeld","felipe massa","david coulthard"],
+        "Gran Premio de Japón": ["michael schumacher","rubens barrichello","kimi raikkonen","juan pablo montoya","ralf schumacher","jarno trulli","jenson button","nick heidfeld","felipe massa","david coulthard"]
     },
     2003: {
-        "Gran Premio de Gran Bretaña": ["rubens barrichello","juan pablo montoya","kimi raikkonen","michael schumacher","ralf schumacher","david coulthard","jenson button","heinz-harold frentzen","mark webber","giancarlo fisichella"],
-        "Gran Premio de Mónaco":       ["juan pablo montoya","kimi raikkonen","michael schumacher","ralf schumacher","jenson button","david coulthard","mark webber","jarno trulli","olivier panis","antonio pizzonia"],
-        "Gran Premio de Hungría":      ["fernando alonso","kimi raikkonen","juan pablo montoya","jenson button","michael schumacher","mark webber","ralf schumacher","david coulthard","jarno trulli","giancarlo fisichella"],
-        "Gran Premio de Italia":       ["michael schumacher","juan pablo montoya","rubens barrichello","jenson button","david coulthard","jarno trulli","giancarlo fisichella","ralph firman","antonio pizzonia","heinz-harold frentzen"],
+        "Gran Premio de Australia": ["david coulthard","juan pablo montoya","kimi raikkonen","michael schumacher","ralf schumacher","jarno trulli","mark webber","heinz harald frentzen","jacques villeneuve","ralf firman"],
+        "Gran Premio de Malasia": ["kimi raikkonen","rubens barrichello","fernando alonso","ralf schumacher","michael schumacher","jarno trulli","david coulthard","jenson button","nick heidfeld","olivier panis"],
+        "Gran Premio de Brasil": ["giancarlo fisichella","kimi raikkonen","fernando alonso","david coulthard","jarno trulli","mark webber","nick heidfeld","antonio pizzonia","ralf firman","christiano da matta"],
+        "Gran Premio de San Marino": ["michael schumacher","kimi raikkonen","rubens barrichello","ralf schumacher","fernando alonso","david coulthard","jarno trulli","mark webber","jenson button","giancarlo fisichella"],
+        "Gran Premio de España": ["michael schumacher","fernando alonso","rubens barrichello","ralf schumacher","david coulthard","jarno trulli","jenson button","giancarlo fisichella","mark webber","olivier panis"],
+        "Gran Premio de Austria": ["michael schumacher","kimi raikkonen","rubens barrichello","ralf schumacher","juan pablo montoya","david coulthard","jarno trulli","jenson button","mark webber","nick heidfeld"],
+        "Gran Premio de Mónaco": ["juan pablo montoya","kimi raikkonen","michael schumacher","ralf schumacher","jarno trulli","jenson button","david coulthard","fernando alonso","mark webber","olivier panis"],
+        "Gran Premio de Canadá": ["michael schumacher","ralf schumacher","juan pablo montoya","rubens barrichello","jarno trulli","david coulthard","fernando alonso","jenson button","mark webber","nick heidfeld"],
+        "Gran Premio de Europa": ["ralf schumacher","juan pablo montoya","rubens barrichello","michael schumacher","jarno trulli","fernando alonso","jenson button","mark webber","david coulthard","nick heidfeld"],
+        "Gran Premio de Francia": ["ralf schumacher","juan pablo montoya","michael schumacher","kimi raikkonen","jarno trulli","jenson button","david coulthard","fernando alonso","mark webber","nick heidfeld"],
+        "Gran Premio de Gran Bretaña": ["rubens barrichello","juan pablo montoya","kimi raikkonen","ralf schumacher","michael schumacher","david coulthard","jarno trulli","fernando alonso","mark webber","jenson button"],
+        "Gran Premio de Alemania": ["juan pablo montoya","david coulthard","ralf schumacher","rubens barrichello","jarno trulli","jenson button","mark webber","nick heidfeld","fernando alonso","olivier panis"],
+        "Gran Premio de Hungría": ["fernando alonso","kimi raikkonen","juan pablo montoya","ralf schumacher","michael schumacher","rubens barrichello","jarno trulli","mark webber","jenson button","nick heidfeld"],
+        "Gran Premio de Italia": ["michael schumacher","juan pablo montoya","rubens barrichello","fernando alonso","ralf schumacher","jarno trulli","david coulthard","jenson button","mark webber","nick heidfeld"],
+        "Gran Premio de Estados Unidos": ["michael schumacher","kimi raikkonen","heinz harald frentzen","nick heidfeld","juan pablo montoya","rubens barrichello","jarno trulli","jenson button","mark webber","ralf schumacher"],
+        "Gran Premio de Japón": ["rubens barrichello","kimi raikkonen","david coulthard","juan pablo montoya","ralf schumacher","fernando alonso","jenson button","jarno trulli","takuma sato","giancarlo fisichella"]
     },
     2004: {
-        "Gran Premio de Mónaco":       ["jarno trulli","jenson button","rubens barrichello","juan pablo montoya","michael schumacher","olivier panis","david coulthard","giancarlo fisichella","kimi raikkonen","antonio pizzonia"],
-        "Gran Premio de Gran Bretaña": ["michael schumacher","kimi raikkonen","rubens barrichello","ralf schumacher","jenson button","juan pablo montoya","takuma sato","david coulthard","giancarlo fisichella","mark webber"],
-        "Gran Premio de Hungría":      ["michael schumacher","rubens barrichello","david coulthard","kimi raikkonen","jenson button","ralf schumacher","takuma sato","giancarlo fisichella","antonio pizzonia","christian klien"],
-        "Gran Premio de Japón":        ["michael schumacher","rubens barrichello","jenson button","david coulthard","takuma sato","mark webber","ralf schumacher","giancarlo fisichella","antonio pizzonia","christian klien"],
+        "Gran Premio de Australia": ["michael schumacher","rubens barrichello","fernando alonso","ralf schumacher","juan pablo montoya","jenson button","takuma sato","mark webber","felipe massa","olivier panis"],
+        "Gran Premio de Malasia": ["michael schumacher","juan pablo montoya","jenson button","fernando alonso","ralf schumacher","takuma sato","mark webber","felipe massa","giancarlo fisichella","christian klien"],
+        "Gran Premio de Bahréin": ["michael schumacher","rubens barrichello","jenson button","jarno trulli","takuma sato","fernando alonso","ralf schumacher","juan pablo montoya","mark webber","felipe massa"],
+        "Gran Premio de San Marino": ["michael schumacher","jenson button","juan pablo montoya","ralf schumacher","jarno trulli","takuma sato","rubens barrichello","fernando alonso","felipe massa","mark webber"],
+        "Gran Premio de España": ["michael schumacher","rubens barrichello","jarno trulli","jenson button","takuma sato","ralf schumacher","fernando alonso","juan pablo montoya","felipe massa","giancarlo fisichella"],
+        "Gran Premio de Mónaco": ["jarno trulli","jenson button","rubens barrichello","fernando alonso","juan pablo montoya","ralf schumacher","takuma sato","felipe massa","david coulthard","olivier panis"],
+        "Gran Premio de Europa": ["michael schumacher","rubens barrichello","jenson button","takuma sato","fernando alonso","juan pablo montoya","ralf schumacher","jarno trulli","felipe massa","david coulthard"],
+        "Gran Premio de Canadá": ["michael schumacher","rubens barrichello","jenson button","fernando alonso","takuma sato","juan pablo montoya","ralf schumacher","mark webber","giancarlo fisichella","felipe massa"],
+        "Gran Premio de Estados Unidos": ["michael schumacher","rubens barrichello","takuma sato","jenson button","juan pablo montoya","ralf schumacher","david coulthard","jarno trulli","olivier panis","christian klien"],
+        "Gran Premio de Francia": ["michael schumacher","fernando alonso","rubens barrichello","jarno trulli","jenson button","takuma sato","juan pablo montoya","ralf schumacher","mark webber","felipe massa"],
+        "Gran Premio de Gran Bretaña": ["michael schumacher","rubens barrichello","jenson button","fernando alonso","juan pablo montoya","ralf schumacher","takuma sato","jarno trulli","felipe massa","mark webber"],
+        "Gran Premio de Alemania": ["michael schumacher","jenson button","fernando alonso","takuma sato","juan pablo montoya","ralf schumacher","rubens barrichello","mark webber","felipe massa","giancarlo fisichella"],
+        "Gran Premio de Hungría": ["michael schumacher","rubens barrichello","fernando alonso","takuma sato","jenson button","juan pablo montoya","ralf schumacher","mark webber","felipe massa","giancarlo fisichella"],
+        "Gran Premio de Bélgica": ["kimi raikkonen","michael schumacher","rubens barrichello","fernando alonso","juan pablo montoya","jenson button","takuma sato","ralf schumacher","mark webber","felipe massa"],
+        "Gran Premio de Italia": ["rubens barrichello","michael schumacher","jenson button","takuma sato","juan pablo montoya","fernando alonso","ralf schumacher","jarno trulli","mark webber","felipe massa"],
+        "Gran Premio de China": ["rubens barrichello","jenson button","kimi raikkonen","fernando alonso","juan pablo montoya","michael schumacher","takuma sato","felipe massa","mark webber","giancarlo fisichella"],
+        "Gran Premio de Japón": ["michael schumacher","rubens barrichello","jenson button","takuma sato","kimi raikkonen","fernando alonso","ralf schumacher","mark webber","felipe massa","giancarlo fisichella"],
+        "Gran Premio de Brasil": ["juan pablo montoya","kimi raikkonen","rubens barrichello","fernando alonso","ralf schumacher","takuma sato","felipe massa","jenson button","christian klien","giancarlo fisichella"]
     },
     2005: {
-        "Gran Premio de Mónaco":       ["nick heidfeld","mark webber","rubens barrichello","david coulthard","jenson button","antonio pizzonia","christian klien","narain karthikeyan","tiago monteiro","christijan albers"],
-        "Gran Premio de Gran Bretaña": ["juan pablo montoya","fernando alonso","kimi raikkonen","michael schumacher","jenson button","rubens barrichello","ralf schumacher","giancarlo fisichella","mark webber","jarno trulli"],
-        "Gran Premio de Hungría":      ["kimi raikkonen","michael schumacher","ralf schumacher","nick heidfeld","giancarlo fisichella","david coulthard","christijan albers","tiago monteiro","narain karthikeyan","robert doornbos"],
-        "Gran Premio de Italia":       ["juan pablo montoya","kimi raikkonen","giancarlo fisichella","ralf schumacher","jenson button","michael schumacher","mark webber","christian klien","david coulthard","nick heidfeld"],
-        "Gran Premio de Japón":        ["kimi raikkonen","giancarlo fisichella","ralf schumacher","jenson button","takuma sato","nick heidfeld","jarno trulli","christian klien","mark webber","narain karthikeyan"],
+        "Gran Premio de Australia": ["giancarlo fisichella","rubens barrichello","fernando alonso","jarno trulli","nick heidfeld","ralf schumacher","mark webber","david coulthard","christijan albers","patrick friesacher"],
+        "Gran Premio de Malasia": ["fernando alonso","jarno trulli","nick heidfeld","ralf schumacher","juan pablo montoya","mark webber","david coulthard","tiago monteiro","narain karthikeyan","christijan albers"],
+        "Gran Premio de Bahréin": ["fernando alonso","jarno trulli","kimi raikkonen","michael schumacher","nick heidfeld","mark webber","ralf schumacher","david coulthard","felipe massa","jacques villeneuve"],
+        "Gran Premio de San Marino": ["fernando alonso","michael schumacher","alexander wurz","jarno trulli","kimi raikkonen","nick heidfeld","mark webber","ralf schumacher","giancarlo fisichella","jenson button"],
+        "Gran Premio de España": ["kimi raikkonen","fernando alonso","jarno trulli","ralf schumacher","michael schumacher","giancarlo fisichella","mark webber","nick heidfeld","david coulthard","felipe massa"],
+        "Gran Premio de Mónaco": ["kimi raikkonen","nick heidfeld","mark webber","fernando alonso","juan pablo montoya","ralf schumacher","michael schumacher","rubens barrichello","giancarlo fisichella","felipe massa"],
+        "Gran Premio de Europa": ["fernando alonso","nick heidfeld","rubens barrichello","mark webber","ralf schumacher","jacques villeneuve","jarno trulli","david coulthard","christijan albers","tiago monteiro"],
+        "Gran Premio de Canadá": ["kimi raikkonen","michael schumacher","rubens barrichello","jenson button","giancarlo fisichella","juan pablo montoya","ralf schumacher","mark webber","felipe massa","jacques villeneuve"],
+        "Gran Premio de Estados Unidos": ["michael schumacher","rubens barrichello","tiago monteiro","narain karthikeyan","christijan albers","patrick friesacher"],
+        "Gran Premio de Francia": ["fernando alonso","kimi raikkonen","michael schumacher","rubens barrichello","jenson button","giancarlo fisichella","ralf schumacher","jarno trulli","mark webber","felipe massa"],
+        "Gran Premio de Gran Bretaña": ["juan pablo montoya","fernando alonso","kimi raikkonen","giancarlo fisichella","jenson button","rubens barrichello","ralf schumacher","david coulthard","christijan albers","felipe massa"],
+        "Gran Premio de Alemania": ["fernando alonso","juan pablo montoya","jenson button","giancarlo fisichella","kimi raikkonen","michael schumacher","ralf schumacher","felipe massa","mark webber","nick heidfeld"],
+        "Gran Premio de Hungría": ["kimi raikkonen","michael schumacher","ralf schumacher","juan pablo montoya","giancarlo fisichella","jarno trulli","jenson button","mark webber","nick heidfeld","david coulthard"],
+        "Gran Premio de Turquía": ["kimi raikkonen","fernando alonso","juan pablo montoya","giancarlo fisichella","ralf schumacher","mark webber","jenson button","david coulthard","christijan albers","tiago monteiro"],
+        "Gran Premio de Italia": ["juan pablo montoya","fernando alonso","giancarlo fisichella","kimi raikkonen","ralf schumacher","rubens barrichello","jenson button","felipe massa","michael schumacher","jacques villeneuve"],
+        "Gran Premio de Bélgica": ["kimi raikkonen","giancarlo fisichella","fernando alonso","juan pablo montoya","jenson button","mark webber","ralf schumacher","felipe massa","michael schumacher","rubens barrichello"],
+        "Gran Premio de Brasil": ["juan pablo montoya","kimi raikkonen","fernando alonso","michael schumacher","giancarlo fisichella","rubens barrichello","jenson button","ralf schumacher","felipe massa","christijan albers"],
+        "Gran Premio de Japón": ["kimi raikkonen","giancarlo fisichella","fernando alonso","mark webber","jenson button","michael schumacher","ralf schumacher","david coulthard","felipe massa","jacques villeneuve"],
+        "Gran Premio de China": ["fernando alonso","kimi raikkonen","ralf schumacher","juan pablo montoya","giancarlo fisichella","michael schumacher","rubens barrichello","jenson button","mark webber","felipe massa"]
     },
     2006: {
-        "Gran Premio de Mónaco":       ["david coulthard","michael schumacher","rubens barrichello","jenson button","mark webber","nico rosberg","tiago monteiro","christijan albers","narain karthikeyan","scott speed"],
-        "Gran Premio de Italia":       ["michael schumacher","kimi raikkonen","nick heidfeld","jenson button","nico rosberg","robert kubica","ralf schumacher","jarno trulli","scott speed","christijan albers"],
-        "Gran Premio de Japón":        ["michael schumacher","giancarlo fisichella","ralf schumacher","robert kubica","nico rosberg","nick heidfeld","jenson button","rubens barrichello","tiago monteiro","christian klien"],
+        "Gran Premio de Bahréin": ["fernando alonso","michael schumacher","kimi raikkonen","jenson button","juan pablo montoya","felipe massa","mark webber","nico rosberg","christian klien","jacques villeneuve"],
+        "Gran Premio de Malasia": ["giancarlo fisichella","fernando alonso","jenson button","nick heidfeld","mark webber","jacques villeneuve","juan pablo montoya","felipe massa","christian klien","nico rosberg"],
+        "Gran Premio de Australia": ["fernando alonso","kimi raikkonen","ralf schumacher","nick heidfeld","giancarlo fisichella","jacques villeneuve","mark webber","nico rosberg","christian klien","rubens barrichello"],
+        "Gran Premio de San Marino": ["michael schumacher","fernando alonso","juan pablo montoya","felipe massa","kimi raikkonen","jenson button","mark webber","nico rosberg","christian klien","jacques villeneuve"],
+        "Gran Premio de Europa": ["michael schumacher","fernando alonso","felipe massa","giancarlo fisichella","kimi raikkonen","rubens barrichello","jacques villeneuve","ralf schumacher","nick heidfeld","david coulthard"],
+        "Gran Premio de España": ["fernando alonso","michael schumacher","giancarlo fisichella","felipe massa","kimi raikkonen","rubens barrichello","jenson button","nick heidfeld","mark webber","david coulthard"],
+        "Gran Premio de Mónaco": ["fernando alonso","juan pablo montoya","david coulthard","michael schumacher","giancarlo fisichella","nick heidfeld","ralf schumacher","rubens barrichello","jacques villeneuve","felipe massa"],
+        "Gran Premio de Gran Bretaña": ["fernando alonso","michael schumacher","kimi raikkonen","felipe massa","giancarlo fisichella","ralf schumacher","jenson button","jarno trulli","nick heidfeld","mark webber"],
+        "Gran Premio de Canadá": ["fernando alonso","michael schumacher","kimi raikkonen","giancarlo fisichella","felipe massa","jarno trulli","ralf schumacher","nick heidfeld","david coulthard","rubens barrichello"],
+        "Gran Premio de Estados Unidos": ["michael schumacher","felipe massa","giancarlo fisichella","jarno trulli","rubens barrichello","david coulthard","tonio liuzzi","scott speed","christijan albers","tiago monteiro"],
+        "Gran Premio de Francia": ["michael schumacher","fernando alonso","felipe massa","ralf schumacher","kimi raikkonen","giancarlo fisichella","nick heidfeld","jarno trulli","david coulthard","rubens barrichello"],
+        "Gran Premio de Alemania": ["michael schumacher","felipe massa","kimi raikkonen","jenson button","fernando alonso","ralf schumacher","nick heidfeld","david coulthard","christijan albers","tiago monteiro"],
+        "Gran Premio de Hungría": ["jenson button","pedro de la rosa","nick heidfeld","rubens barrichello","david coulthard","ralf schumacher","felipe massa","giancarlo fisichella","tonio liuzzi","christijan albers"],
+        "Gran Premio de Turquía": ["felipe massa","fernando alonso","michael schumacher","giancarlo fisichella","kimi raikkonen","nick heidfeld","jenson button","pedro de la rosa","mark webber","nico rosberg"],
+        "Gran Premio de Italia": ["michael schumacher","kimi raikkonen","robert kubica","giancarlo fisichella","fernando alonso","felipe massa","jarno trulli","nick heidfeld","rubens barrichello","jenson button"],
+        "Gran Premio de China": ["michael schumacher","fernando alonso","giancarlo fisichella","rubens barrichello","jenson button","pedro de la rosa","nick heidfeld","mark webber","nico rosberg","tonio liuzzi"],
+        "Gran Premio de Japón": ["fernando alonso","felipe massa","giancarlo fisichella","jenson button","kimi raikkonen","pedro de la rosa","mark webber","rubens barrichello","nick heidfeld","david coulthard"],
+        "Gran Premio de Brasil": ["felipe massa","fernando alonso","jenson button","michael schumacher","kimi raikkonen","giancarlo fisichella","rubens barrichello","nick heidfeld","robert kubica","scott speed"]
     },
     2007: {
-        "Gran Premio de Mónaco":       ["fernando alonso","lewis hamilton","felipe massa","mark webber","jenson button","giancarlo fisichella","nico rosberg","david coulthard","jarno trulli","heikki kovalainen"],
-        "Gran Premio de Gran Bretaña": ["kimi raikkonen","lewis hamilton","nico rosberg","rubens barrichello","mark webber","nick heidfeld","fernando alonso","ralf schumacher","jenson button","heikki kovalainen"],
-        "Gran Premio de Hungría":      ["lewis hamilton","kimi raikkonen","nick heidfeld","fernando alonso","heikki kovalainen","ralf schumacher","nico rosberg","giancarlo fisichella","jarno trulli","jenson button"],
-        "Gran Premio de Italia":       ["fernando alonso","lewis hamilton","kimi raikkonen","nick heidfeld","robert kubica","nico rosberg","mark webber","ralf schumacher","alexander wurz","jenson button"],
-        "Gran Premio de Japón":        ["lewis hamilton","heikki kovalainen","kimi raikkonen","fernando alonso","robert kubica","nick heidfeld","jenson button","mark webber","jarno trulli","giancarlo fisichella"],
+        "Gran Premio de Australia": ["kimi raikkonen","fernando alonso","lewis hamilton","nick heidfeld","giancarlo fisichella","felipe massa","nico rosberg","ralf schumacher","robert kubica","heikki kovalainen"],
+        "Gran Premio de Malasia": ["fernando alonso","lewis hamilton","kimi raikkonen","nick heidfeld","robert kubica","jarno trulli","ralf schumacher","mark webber","giancarlo fisichella","nico rosberg"],
+        "Gran Premio de Bahréin": ["felipe massa","lewis hamilton","kimi raikkonen","nick heidfeld","fernando alonso","heikki kovalainen","jarno trulli","ralf schumacher","mark webber","alexander wurz"],
+        "Gran Premio de España": ["felipe massa","lewis hamilton","fernando alonso","robert kubica","giancarlo fisichella","jarno trulli","nick heidfeld","david coulthard","nico rosberg","alexander wurz"],
+        "Gran Premio de Mónaco": ["fernando alonso","lewis hamilton","felipe massa","giancarlo fisichella","robert kubica","nick heidfeld","alexander wurz","jarno trulli","mark webber","ralf schumacher"],
+        "Gran Premio de Canadá": ["lewis hamilton","nick heidfeld","alexander wurz","heikki kovalainen","kimi raikkonen","fernando alonso","nico rosberg","jarno trulli","takuma sato","ralf schumacher"],
+        "Gran Premio de Estados Unidos": ["lewis hamilton","fernando alonso","felipe massa","nick heidfeld","heikki kovalainen","jarno trulli","mark webber","nico rosberg","alexander wurz","vitantonio liuzzi"],
+        "Gran Premio de Francia": ["kimi raikkonen","felipe massa","lewis hamilton","robert kubica","nick heidfeld","heikki kovalainen","giancarlo fisichella","jarno trulli","nico rosberg","david coulthard"],
+        "Gran Premio de Gran Bretaña": ["kimi raikkonen","fernando alonso","lewis hamilton","felipe massa","nick heidfeld","robert kubica","heikki kovalainen","giancarlo fisichella","nico rosberg","alexander wurz"],
+        "Gran Premio de Europa": ["fernando alonso","felipe massa","mark webber","alexander wurz","david coulthard","nick heidfeld","robert kubica","heikki kovalainen","nico rosberg","ralf schumacher"],
+        "Gran Premio de Hungría": ["lewis hamilton","kimi raikkonen","nick heidfeld","fernando alonso","robert kubica","ralf schumacher","nico rosberg","heikki kovalainen","jarno trulli","mark webber"],
+        "Gran Premio de Turquía": ["felipe massa","kimi raikkonen","fernando alonso","lewis hamilton","nick heidfeld","nico rosberg","robert kubica","heikki kovalainen","giancarlo fisichella","jarno trulli"],
+        "Gran Premio de Italia": ["fernando alonso","lewis hamilton","kimi raikkonen","nick heidfeld","felipe massa","robert kubica","nico rosberg","heikki kovalainen","jarno trulli","sebastian vettel"],
+        "Gran Premio de Bélgica": ["kimi raikkonen","felipe massa","fernando alonso","lewis hamilton","nick heidfeld","nico rosberg","mark webber","heikki kovalainen","robert kubica","jarno trulli"],
+        "Gran Premio de Japón": ["lewis hamilton","heikki kovalainen","kimi raikkonen","david coulthard","giancarlo fisichella","felipe massa","fernando alonso","alexander wurz","vitantonio liuzzi","jenson button"],
+        "Gran Premio de China": ["kimi raikkonen","fernando alonso","felipe massa","lewis hamilton","nick heidfeld","robert kubica","nico rosberg","heikki kovalainen","rubens barrichello","sebastian vettel"],
+        "Gran Premio de Brasil": ["kimi raikkonen","felipe massa","fernando alonso","nick heidfeld","nico rosberg","robert kubica","heikki kovalainen","jarno trulli","mark webber","sebastian vettel"]
     },
     2008: {
-        "Gran Premio de Mónaco":       ["lewis hamilton","robert kubica","felipe massa","mark webber","nico rosberg","heikki kovalainen","david coulthard","sebastien bourdais","jarno trulli","jenson button"],
-        "Gran Premio de Gran Bretaña": ["mark webber","nico rosberg","kimi raikkonen","lewis hamilton","nick heidfeld","jarno trulli","sebastien bourdais","timo glock","jenson button","heikki kovalainen"],
-        "Gran Premio de Hungría":      ["heikki kovalainen","timo glock","kimi raikkonen","mark webber","lewis hamilton","nico rosberg","jarno trulli","nick heidfeld","sebastien bourdais","jenson button"],
-        "Gran Premio de Italia":       ["sebastian vettel","heikki kovalainen","robert kubica","lewis hamilton","timo glock","kimi raikkonen","sebastien bourdais","mark webber","nick heidfeld","david coulthard"],
-        "Gran Premio de Brasil":       ["felipe massa","lewis hamilton","kimi raikkonen","fernando alonso","sebastian vettel","mark webber","robert kubica","timo glock","heikki kovalainen","nico rosberg"],
+        "Gran Premio de Australia": ["lewis hamilton","nick heidfeld","nico rosberg","fernando alonso","heikki kovalainen","kazuki nakajima","sebastien bourdais","kimi raikkonen","timo glock","jarno trulli"],
+        "Gran Premio de Malasia": ["kimi raikkonen","robert kubica","heikki kovalainen","jarno trulli","lewis hamilton","nick heidfeld","mark webber","fernando alonso","david coulthard","jenson button"],
+        "Gran Premio de Bahréin": ["felipe massa","kimi raikkonen","robert kubica","nick heidfeld","heikki kovalainen","jarno trulli","mark webber","nico rosberg","lewis hamilton","timo glock"],
+        "Gran Premio de España": ["kimi raikkonen","felipe massa","lewis hamilton","robert kubica","mark webber","jenson button","kazuki nakajima","jarno trulli","sebastien bourdais","nico rosberg"],
+        "Gran Premio de Turquía": ["felipe massa","lewis hamilton","kimi raikkonen","robert kubica","fernando alonso","nick heidfeld","heikki kovalainen","nico rosberg","sebastien bourdais","jarno trulli"],
+        "Gran Premio de Mónaco": ["lewis hamilton","robert kubica","felipe massa","mark webber","sebastian vettel","rubens barrichello","kazuki nakajima","heikki kovalainen","kimi raikkonen","adrian sutil"],
+        "Gran Premio de Canadá": ["robert kubica","nick heidfeld","david coulthard","timo glock","felipe massa","jarno trulli","rubens barrichello","sebastian vettel","nico rosberg","fernando alonso"],
+        "Gran Premio de Francia": ["felipe massa","kimi raikkonen","jarno trulli","heikki kovalainen","robert kubica","mark webber","fernando alonso","lewis hamilton","nico rosberg","sebastian vettel"],
+        "Gran Premio de Gran Bretaña": ["lewis hamilton","nick heidfeld","rubens barrichello","kimi raikkonen","heikki kovalainen","fernando alonso","jarno trulli","kazuki nakajima","nico rosberg","sebastian vettel"],
+        "Gran Premio de Alemania": ["lewis hamilton","nelson piquet","felipe massa","nick heidfeld","heikki kovalainen","kimi raikkonen","robert kubica","sebastian vettel","jarno trulli","nico rosberg"],
+        "Gran Premio de Hungría": ["heikki kovalainen","timo glock","kimi raikkonen","fernando alonso","lewis hamilton","nelson piquet","jarno trulli","robert kubica","nico rosberg","felipe massa"],
+        "Gran Premio de Europa": ["felipe massa","lewis hamilton","robert kubica","heikki kovalainen","jarno trulli","sebastian vettel","timo glock","nico rosberg","fernando alonso","nick heidfeld"],
+        "Gran Premio de Bélgica": ["felipe massa","nick heidfeld","lewis hamilton","fernando alonso","sebastian vettel","robert kubica","nico rosberg","heikki kovalainen","timo glock","mark webber"],
+        "Gran Premio de Italia": ["sebastian vettel","heikki kovalainen","robert kubica","fernando alonso","nick heidfeld","felipe massa","lewis hamilton","mark webber","timo glock","nico rosberg"],
+        "Gran Premio de Singapur": ["fernando alonso","nico rosberg","lewis hamilton","timo glock","sebastian vettel","nick heidfeld","david coulthard","kazuki nakajima","jarno trulli","jenson button"],
+        "Gran Premio de Japón": ["fernando alonso","robert kubica","kimi raikkonen","nelson piquet","felipe massa","mark webber","sebastian vettel","rubens barrichello","timo glock","jarno trulli"],
+        "Gran Premio de China": ["lewis hamilton","felipe massa","kimi raikkonen","fernando alonso","heikki kovalainen","sebastian vettel","jarno trulli","sebastien bourdais","timo glock","nick heidfeld"],
+        "Gran Premio de Brasil": ["felipe massa","fernando alonso","kimi raikkonen","sebastian vettel","lewis hamilton","jarno trulli","mark webber","nico rosberg","robert kubica","timo glock"]
     },
     2009: {
-        "Gran Premio de Gran Bretaña": ["sebastian vettel","mark webber","rubens barrichello","jenson button","kimi raikkonen","heikki kovalainen","romain grosjean","nick heidfeld","timo glock","giancarlo fisichella"],
-        "Gran Premio de Mónaco":       ["jenson button","rubens barrichello","kimi raikkonen","felipe massa","mark webber","nico rosberg","jarno trulli","timo glock","heikki kovalainen","romain grosjean"],
-        "Gran Premio de Hungría":      ["lewis hamilton","kimi raikkonen","mark webber","heikki kovalainen","nico rosberg","romain grosjean","giancarlo fisichella","sebastian vettel","nick heidfeld","timo glock"],
-        "Gran Premio de Japón":        ["sebastian vettel","jarno trulli","lewis hamilton","nick heidfeld","timo glock","heikki kovalainen","nico rosberg","rubens barrichello","kamui kobayashi","romain grosjean"],
-        "Gran Premio de Abu Dabi":     ["sebastian vettel","mark webber","jenson button","rubens barrichello","kimi raikkonen","nico rosberg","timo glock","heikki kovalainen","giancarlo fisichella","romain grosjean"],
+        "Gran Premio de Australia": ["jenson button","rubens barrichello","jarno trulli","timo glock","fernando alonso","nico rosberg","sebastien buemi","sebastian bourdais","adrian sutil","nick heidfeld"],
+        "Gran Premio de Malasia": ["jenson button","nick heidfeld","timo glock","jarno trulli","rubens barrichello","mark webber","lewis hamilton","nico rosberg","felipe massa","sebastian vettel"],
+        "Gran Premio de China": ["sebastian vettel","mark webber","jenson button","rubens barrichello","heikki kovalainen","lewis hamilton","timo glock","fernando alonso","nico rosberg","sebastien buemi"],
+        "Gran Premio de Bahréin": ["jenson button","sebastian vettel","jarno trulli","lewis hamilton","rubens barrichello","kimi raikkonen","timo glock","fernando alonso","nico rosberg","nelson piquet"],
+        "Gran Premio de España": ["jenson button","rubens barrichello","mark webber","sebastian vettel","fernando alonso","felipe massa","nico rosberg","lewis hamilton","timo glock","nick heidfeld"],
+        "Gran Premio de Mónaco": ["jenson button","rubens barrichello","kimi raikkonen","felipe massa","mark webber","nico rosberg","fernando alonso","sebastian vettel","timo glock","nick heidfeld"],
+        "Gran Premio de Turquía": ["jenson button","mark webber","sebastian vettel","jarno trulli","nico rosberg","felipe massa","robert kubica","timo glock","nick heidfeld","fernando alonso"],
+        "Gran Premio de Gran Bretaña": ["sebastian vettel","mark webber","rubens barrichello","jenson button","nico rosberg","jarno trulli","kimi raikkonen","timo glock","fernando alonso","lewis hamilton"],
+        "Gran Premio de Alemania": ["mark webber","sebastian vettel","felipe massa","nico rosberg","jenson button","rubens barrichello","fernando alonso","heikki kovalainen","timo glock","nick heidfeld"],
+        "Gran Premio de Hungría": ["lewis hamilton","kimi raikkonen","mark webber","nico rosberg","heikki kovalainen","timo glock","jenson button","jarno trulli","kazuki nakajima","rubens barrichello"],
+        "Gran Premio de Europa": ["rubens barrichello","lewis hamilton","kimi raikkonen","heikki kovalainen","nico rosberg","fernando alonso","jenson button","robert kubica","timo glock","nick heidfeld"],
+        "Gran Premio de Bélgica": ["kimi raikkonen","giancarlo fisichella","sebastian vettel","robert kubica","nick heidfeld","heikki kovalainen","rubens barrichello","nico rosberg","mark webber","timo glock"],
+        "Gran Premio de Italia": ["rubens barrichello","jenson button","kimi raikkonen","lewis hamilton","adrian sutil","fernando alonso","heikki kovalainen","nico rosberg","sebastian vettel","tonio liuzzi"],
+        "Gran Premio de Singapur": ["lewis hamilton","timo glock","fernando alonso","sebastian vettel","jenson button","rubens barrichello","heikki kovalainen","robert kubica","nico rosberg","jarno trulli"],
+        "Gran Premio de Japón": ["sebastian vettel","jarno trulli","lewis hamilton","kimi raikkonen","nico rosberg","nick heidfeld","rubens barrichello","jenson button","adrian sutil","tonio liuzzi"],
+        "Gran Premio de Brasil": ["mark webber","robert kubica","lewis hamilton","sebastian vettel","jenson button","kimi raikkonen","sebastien buemi","rubens barrichello","nico rosberg","jarno trulli"],
+        "Gran Premio de Abu Dabi": ["sebastian vettel","mark webber","jenson button","rubens barrichello","nico rosberg","robert kubica","nick heidfeld","kamui kobayashi","jarno trulli","jaime alguersuari"]
     },
     2010: {
-        "Gran Premio de Gran Bretaña": ["mark webber","lewis hamilton","nico rosberg","rubens barrichello","adrian sutil","jenson button","heikki kovalainen","vitaly petrov","sebastien buemi","timo glock"],
-        "Gran Premio de Mónaco":       ["mark webber","sebastian vettel","robert kubica","fernando alonso","michael schumacher","rubens barrichello","nico rosberg","jenson button","lewis hamilton","vitaly petrov"],
-        "Gran Premio de Hungría":      ["mark webber","fernando alonso","sebastian vettel","jenson button","michael schumacher","robert kubica","nico rosberg","rubens barrichello","vitaly petrov","nick heidfeld"],
-        "Gran Premio de Italia":       ["fernando alonso","jenson button","felipe massa","lewis hamilton","nico hulkenberg","michael schumacher","vitaly petrov","robert kubica","nick heidfeld","heikki kovalainen"],
-        "Gran Premio de Abu Dabi":     ["sebastian vettel","lewis hamilton","jenson button","fernando alonso","michael schumacher","nico rosberg","vitaly petrov","robert kubica","adrian sutil","timo glock"],
+        "Gran Premio de Bahréin": ["fernando alonso","felipe massa","lewis hamilton","sebastian vettel","nico rosberg","michael schumacher","jenson button","mark webber","vitantonio liuzzi","rubens barrichello"],
+        "Gran Premio de Australia": ["jenson button","robert kubica","felipe massa","fernando alonso","nico rosberg","lewis hamilton","vitantonio liuzzi","rubens barrichello","mark webber","michael schumacher"],
+        "Gran Premio de Malasia": ["sebastian vettel","mark webber","nico rosberg","robert kubica","adrian sutil","lewis hamilton","felipe massa","jenson button","jaime alguersuari","nico hulkenberg"],
+        "Gran Premio de China": ["jenson button","lewis hamilton","nico rosberg","fernando alonso","robert kubica","sebastian vettel","vitaly petrov","mark webber","felipe massa","michael schumacher"],
+        "Gran Premio de España": ["mark webber","fernando alonso","sebastian vettel","michael schumacher","jenson button","felipe massa","adrian sutil","robert kubica","rubens barrichello","jaime alguersuari"],
+        "Gran Premio de Mónaco": ["mark webber","sebastian vettel","robert kubica","felipe massa","lewis hamilton","vitantonio liuzzi","rubens barrichello","fernando alonso","nico rosberg","karun chandhok"],
+        "Gran Premio de Turquía": ["lewis hamilton","jenson button","mark webber","sebastian vettel","michael schumacher","nico rosberg","robert kubica","felipe massa","fernando alonso","vitaly petrov"],
+        "Gran Premio de Canadá": ["lewis hamilton","jenson button","fernando alonso","sebastian vettel","mark webber","nico rosberg","robert kubica","vitantonio liuzzi","rubens barrichello","adrian sutil"],
+        "Gran Premio de Europa": ["sebastian vettel","lewis hamilton","jenson button","rubens barrichello","robert kubica","adrian sutil","kamui kobayashi","fernando alonso","sebastien buemi","nico rosberg"],
+        "Gran Premio de Gran Bretaña": ["mark webber","lewis hamilton","nico rosberg","jenson button","sebastian vettel","adrian sutil","michael schumacher","nico hulkenberg","rubens barrichello","kamui kobayashi"],
+        "Gran Premio de Alemania": ["fernando alonso","felipe massa","sebastian vettel","lewis hamilton","jenson button","mark webber","robert kubica","nico rosberg","michael schumacher","vitaly petrov"],
+        "Gran Premio de Hungría": ["mark webber","fernando alonso","sebastian vettel","felipe massa","vitaly petrov","nico hulkenberg","pedro de la rosa","jenson button","kamui kobayashi","rubens barrichello"],
+        "Gran Premio de Bélgica": ["lewis hamilton","mark webber","robert kubica","felipe massa","adrian sutil","nico rosberg","michael schumacher","kamui kobayashi","vitaly petrov","nico hulkenberg"],
+        "Gran Premio de Italia": ["fernando alonso","jenson button","felipe massa","lewis hamilton","nico rosberg","nico hulkenberg","robert kubica","michael schumacher","rubens barrichello","sebastien buemi"],
+        "Gran Premio de Singapur": ["fernando alonso","sebastian vettel","mark webber","lewis hamilton","nico rosberg","robert kubica","felipe massa","vitantonio liuzzi","rubens barrichello","nico hulkenberg"],
+        "Gran Premio de Japón": ["sebastian vettel","mark webber","fernando alonso","jenson button","lewis hamilton","michael schumacher","kamui kobayashi","nico rosberg","rubens barrichello","sebastien buemi"],
+        "Gran Premio de Corea": ["fernando alonso","lewis hamilton","felipe massa","michael schumacher","robert kubica","vitantonio liuzzi","rubens barrichello","kamui kobayashi","nick heidfeld","nico hulkenberg"],
+        "Gran Premio de Brasil": ["sebastian vettel","mark webber","fernando alonso","lewis hamilton","jenson button","nico rosberg","michael schumacher","nico hulkenberg","robert kubica","kamui kobayashi"],
+        "Gran Premio de Abu Dabi": ["sebastian vettel","lewis hamilton","jenson button","nico rosberg","robert kubica","vitantonio liuzzi","felipe massa","fernando alonso","mark webber","jaime alguersuari"]
     },
     2011: {
-        "Gran Premio de Gran Bretaña": ["fernando alonso","sebastian vettel","mark webber","jenson button","felipe massa","nico rosberg","michael schumacher","lewis hamilton","paul di resta","vitaly petrov"],
-        "Gran Premio de Mónaco":       ["sebastian vettel","mark webber","jenson button","fernando alonso","michael schumacher","david coulthard","nico rosberg","lewis hamilton","kamui kobayashi","jaime alguersuari"],
-        "Gran Premio de Hungría":      ["jenson button","sebastian vettel","mark webber","fernando alonso","lewis hamilton","nico rosberg","michael schumacher","kamui kobayashi","jaime alguersuari","paul di resta"],
-        "Gran Premio de Italia":       ["sebastian vettel","jenson button","fernando alonso","mark webber","nico rosberg","michael schumacher","jaime alguersuari","paul di resta","kamui kobayashi","vitaly petrov"],
-        "Gran Premio de Japón":        ["jenson button","sebastian vettel","fernando alonso","mark webber","michael schumacher","nico rosberg","lewis hamilton","kamui kobayashi","jaime alguersuari","paul di resta"],
+        "Gran Premio de Australia": ["sebastian vettel","lewis hamilton","vitaly petrov","fernando alonso","mark webber","jenson button","sergio perez","kamui kobayashi","felipe massa","sebastien buemi"],
+        "Gran Premio de Malasia": ["sebastian vettel","jenson button","nick heidfeld","mark webber","felipe massa","fernando alonso","kamui kobayashi","lewis hamilton","michael schumacher","paul di resta"],
+        "Gran Premio de China": ["lewis hamilton","sebastian vettel","mark webber","jenson button","nico rosberg","felipe massa","fernando alonso","michael schumacher","vitaly petrov","kamui kobayashi"],
+        "Gran Premio de Turquía": ["sebastian vettel","mark webber","fernando alonso","lewis hamilton","nico rosberg","jenson button","nick heidfeld","vitaly petrov","sebastien buemi","kamui kobayashi"],
+        "Gran Premio de España": ["sebastian vettel","lewis hamilton","jenson button","mark webber","fernando alonso","michael schumacher","nico rosberg","nick heidfeld","sergio perez","kamui kobayashi"],
+        "Gran Premio de Mónaco": ["sebastian vettel","fernando alonso","jenson button","mark webber","lewis hamilton","nico rosberg","felipe massa","pastor maldonado","sergio perez","adrian sutil"],
+        "Gran Premio de Canadá": ["jenson button","sebastian vettel","mark webber","michael schumacher","vitaly petrov","felipe massa","kamui kobayashi","jaime alguersuari","rubens barrichello","sebastien buemi"],
+        "Gran Premio de Europa": ["sebastian vettel","fernando alonso","mark webber","lewis hamilton","felipe massa","jenson button","nico rosberg","jaime alguersuari","adrian sutil","nick heidfeld"],
+        "Gran Premio de Gran Bretaña": ["fernando alonso","sebastian vettel","mark webber","lewis hamilton","felipe massa","nico rosberg","sergio perez","nick heidfeld","kamui kobayashi","michael schumacher"],
+        "Gran Premio de Alemania": ["lewis hamilton","fernando alonso","mark webber","sebastian vettel","felipe massa","nico rosberg","kamui kobayashi","nick heidfeld","sebastien buemi","adrian sutil"],
+        "Gran Premio de Hungría": ["jenson button","sebastian vettel","fernando alonso","lewis hamilton","mark webber","felipe massa","paul di resta","sebastien buemi","nico rosberg","jaime alguersuari"],
+        "Gran Premio de Bélgica": ["sebastian vettel","mark webber","jenson button","fernando alonso","michael schumacher","nico rosberg","adrian sutil","felipe massa","vitaly petrov","pastor maldonado"],
+        "Gran Premio de Italia": ["sebastian vettel","jenson button","fernando alonso","lewis hamilton","michael schumacher","felipe massa","jaime alguersuari","paul di resta","bruno senna","kamui kobayashi"],
+        "Gran Premio de Singapur": ["sebastian vettel","jenson button","mark webber","fernando alonso","lewis hamilton","paul di resta","nico rosberg","adrian sutil","felipe massa","sergio perez"],
+        "Gran Premio de Japón": ["jenson button","fernando alonso","sebastian vettel","mark webber","lewis hamilton","michael schumacher","felipe massa","sergio perez","vitaly petrov","nico rosberg"],
+        "Gran Premio de Corea": ["sebastian vettel","lewis hamilton","mark webber","jenson button","fernando alonso","felipe massa","jaime alguersuari","nico rosberg","sebastien buemi","paul di resta"],
+        "Gran Premio de India": ["sebastian vettel","jenson button","fernando alonso","mark webber","michael schumacher","nico rosberg","lewis hamilton","adrian sutil","sergio perez","kamui kobayashi"],
+        "Gran Premio de Abu Dabi": ["lewis hamilton","fernando alonso","jenson button","mark webber","sebastian vettel","felipe massa","sergio perez","bruno senna","paul di resta","kamui kobayashi"],
+        "Gran Premio de Brasil": ["mark webber","sebastian vettel","jenson button","fernando alonso","lewis hamilton","felipe massa","adrian sutil","nico rosberg","kamui kobayashi","vitaly petrov"]
     },
     2012: {
-        "Gran Premio de Gran Bretaña": ["mark webber","fernando alonso","sebastian vettel","nico rosberg","lewis hamilton","jenson button","kamui kobayashi","romain grosjean","michael schumacher","pablo maldonado"],
-        "Gran Premio de Mónaco":       ["mark webber","nico rosberg","fernando alonso","michael schumacher","jenson button","romain grosjean","sebastian vettel","lewis hamilton","kamui kobayashi","paul di resta"],
-        "Gran Premio de Hungría":      ["lewis hamilton","kimi raikkonen","romain grosjean","sebastian vettel","fernando alonso","mark webber","jenson button","nico rosberg","pastor maldonado","sergio perez"],
-        "Gran Premio de Italia":       ["lewis hamilton","sebastian vettel","jenson button","felipe massa","nico rosberg","kimi raikkonen","michael schumacher","sergio perez","romain grosjean","mark webber"],
-        "Gran Premio de Brasil":       ["jenson button","fernando alonso","felipe massa","sebastian vettel","nico hulkenberg","nico rosberg","kimi raikkonen","lewis hamilton","kamui kobayashi","pastor maldonado"],
+        "Gran Premio de Australia": ["jenson button","sebastian vettel","lewis hamilton","mark webber","fernando alonso","kamui kobayashi","kimi raikkonen","sergio perez","daniel ricciardo","paul di resta"],
+        "Gran Premio de Malasia": ["fernando alonso","sergio perez","lewis hamilton","mark webber","kimi raikkonen","bruno senna","paul di resta","jean eric vergne","nico hulkenberg","michael schumacher"],
+        "Gran Premio de China": ["nico rosberg","jenson button","lewis hamilton","mark webber","sebastian vettel","romain grosjean","bruno senna","pastor maldonado","fernando alonso","kamui kobayashi"],
+        "Gran Premio de Bahréin": ["sebastian vettel","kimi raikkonen","romain grosjean","mark webber","nico rosberg","paul di resta","fernando alonso","lewis hamilton","felipe massa","michael schumacher"],
+        "Gran Premio de España": ["pastor maldonado","fernando alonso","kimi raikkonen","romain grosjean","kamui kobayashi","sebastian vettel","nico rosberg","lewis hamilton","jenson button","nico hulkenberg"],
+        "Gran Premio de Mónaco": ["mark webber","nico rosberg","fernando alonso","sebastian vettel","lewis hamilton","felipe massa","paul di resta","nico hulkenberg","kimi raikkonen","bruno senna"],
+        "Gran Premio de Canadá": ["lewis hamilton","romain grosjean","sergio perez","sebastian vettel","fernando alonso","nico rosberg","mark webber","kimi raikkonen","kamui kobayashi","felipe massa"],
+        "Gran Premio de Europa": ["fernando alonso","kimi raikkonen","michael schumacher","mark webber","nico hulkenberg","nico rosberg","paul di resta","jenson button","sergio perez","daniel ricciardo"],
+        "Gran Premio de Gran Bretaña": ["mark webber","fernando alonso","sebastian vettel","felipe massa","kimi raikkonen","romain grosjean","michael schumacher","lewis hamilton","bruno senna","jenson button"],
+        "Gran Premio de Alemania": ["fernando alonso","sebastian vettel","jenson button","kimi raikkonen","kamui kobayashi","felipe massa","pastor maldonado","nico hulkenberg","nico rosberg","sergio perez"],
+        "Gran Premio de Hungría": ["lewis hamilton","kimi raikkonen","romain grosjean","sebastian vettel","fernando alonso","jenson button","bruno senna","mark webber","nico rosberg","paul di resta"],
+        "Gran Premio de Bélgica": ["jenson button","sebastian vettel","kimi raikkonen","nico hulkenberg","felipe massa","mark webber","michael schumacher","jean eric vergne","daniel ricciardo","paul di resta"],
+        "Gran Premio de Italia": ["lewis hamilton","sergio perez","fernando alonso","felipe massa","kimi raikkonen","michael schumacher","nico rosberg","paul di resta","kamui kobayashi","bruno senna"],
+        "Gran Premio de Singapur": ["sebastian vettel","jenson button","fernando alonso","paul di resta","nico rosberg","kimi raikkonen","romain grosjean","felipe massa","daniel ricciardo","nico hulkenberg"],
+        "Gran Premio de Japón": ["sebastian vettel","felipe massa","kamui kobayashi","jenson button","lewis hamilton","kimi raikkonen","nico hulkenberg","pastor maldonado","mark webber","daniel ricciardo"],
+        "Gran Premio de Corea": ["sebastian vettel","mark webber","fernando alonso","felipe massa","kimi raikkonen","nico hulkenberg","romain grosjean","jean eric vergne","daniel ricciardo","sergio perez"],
+        "Gran Premio de India": ["sebastian vettel","fernando alonso","mark webber","lewis hamilton","jenson button","felipe massa","nico hulkenberg","kimi raikkonen","sergio perez","daniel ricciardo"],
+        "Gran Premio de Abu Dabi": ["kimi raikkonen","fernando alonso","sebastian vettel","mark webber","lewis hamilton","jenson button","nico hulkenberg","pastor maldonado","bruno senna","paul di resta"],
+        "Gran Premio de Estados Unidos": ["lewis hamilton","sebastian vettel","fernando alonso","felipe massa","jenson button","kimi raikkonen","romain grosjean","nico hulkenberg","bruno senna","paul di resta"],
+        "Gran Premio de Brasil": ["jenson button","fernando alonso","felipe massa","mark webber","nico hulkenberg","sebastian vettel","michael schumacher","jean eric vergne","kamui kobayashi","kimi raikkonen"]
     },
     2013: {
-        "Gran Premio de Gran Bretaña": ["nico rosberg","mark webber","fernando alonso","sebastian vettel","kimi raikkonen","jenson button","romain grosjean","lewis hamilton","adrian sutil","pastor maldonado"],
-        "Gran Premio de Mónaco":       ["nico rosberg","sebastian vettel","mark webber","lewis hamilton","felipe massa","romain grosjean","kimi raikkonen","daniel ricciardo","jean-eric vergne","sergio perez"],
-        "Gran Premio de Hungría":      ["lewis hamilton","kimi raikkonen","sebastian vettel","romain grosjean","jenson button","mark webber","felipe massa","nico rosberg","sergio perez","daniel ricciardo"],
-        "Gran Premio de Italia":       ["sebastian vettel","mark webber","lewis hamilton","kimi raikkonen","felipe massa","nico rosberg","jenson button","romain grosjean","jean-eric vergne","daniel ricciardo"],
+        "Gran Premio de Australia": ["kimi raikkonen","fernando alonso","sebastian vettel","felipe massa","lewis hamilton","mark webber","adrian sutil","paul di resta","jenson button","romain grosjean"],
+        "Gran Premio de Malasia": ["sebastian vettel","mark webber","lewis hamilton","nico rosberg","felipe massa","romain grosjean","kimi raikkonen","nico hulkenberg","sergio perez","jean eric vergne"],
+        "Gran Premio de China": ["fernando alonso","kimi raikkonen","lewis hamilton","sebastian vettel","jenson button","felipe massa","daniel ricciardo","paul di resta","romain grosjean","nico hulkenberg"],
+        "Gran Premio de Bahréin": ["sebastian vettel","kimi raikkonen","romain grosjean","paul di resta","lewis hamilton","sergio perez","mark webber","fernando alonso","nico rosberg","jenson button"],
+        "Gran Premio de España": ["fernando alonso","kimi raikkonen","felipe massa","sebastian vettel","mark webber","nico rosberg","paul di resta","jenson button","sergio perez","daniel ricciardo"],
+        "Gran Premio de Mónaco": ["nico rosberg","sebastian vettel","mark webber","lewis hamilton","adrian sutil","jenson button","fernando alonso","jean eric vergne","paul di resta","kimi raikkonen"],
+        "Gran Premio de Canadá": ["sebastian vettel","fernando alonso","lewis hamilton","mark webber","nico rosberg","jean eric vergne","paul di resta","adrian sutil","felipe massa","kimi raikkonen"],
+        "Gran Premio de Gran Bretaña": ["nico rosberg","mark webber","fernando alonso","lewis hamilton","kimi raikkonen","felipe massa","adrian sutil","daniel ricciardo","paul di resta","nico hulkenberg"],
+        "Gran Premio de Alemania": ["sebastian vettel","kimi raikkonen","romain grosjean","fernando alonso","lewis hamilton","jenson button","mark webber","sergio perez","nico rosberg","nico hulkenberg"],
+        "Gran Premio de Hungría": ["lewis hamilton","kimi raikkonen","sebastian vettel","mark webber","fernando alonso","romain grosjean","jenson button","felipe massa","sergio perez","pastor maldonado"],
+        "Gran Premio de Bélgica": ["sebastian vettel","fernando alonso","lewis hamilton","nico rosberg","mark webber","jenson button","felipe massa","romain grosjean","adrian sutil","daniel ricciardo"],
+        "Gran Premio de Italia": ["sebastian vettel","fernando alonso","mark webber","felipe massa","nico hulkenberg","nico rosberg","daniel ricciardo","romain grosjean","lewis hamilton","jenson button"],
+        "Gran Premio de Singapur": ["sebastian vettel","fernando alonso","kimi raikkonen","nico rosberg","lewis hamilton","felipe massa","jenson button","sergio perez","nico hulkenberg","adrian sutil"],
+        "Gran Premio de Corea": ["sebastian vettel","kimi raikkonen","romain grosjean","nico hulkenberg","lewis hamilton","fernando alonso","nico rosberg","jenson button","felipe massa","sergio perez"],
+        "Gran Premio de Japón": ["sebastian vettel","mark webber","romain grosjean","fernando alonso","kimi raikkonen","nico hulkenberg","esteban gutierrez","nico rosberg","jenson button","felipe massa"],
+        "Gran Premio de India": ["sebastian vettel","nico rosberg","romain grosjean","mark webber","fernando alonso","lewis hamilton","kimi raikkonen","paul di resta","adrian sutil","sergio perez"],
+        "Gran Premio de Abu Dabi": ["sebastian vettel","mark webber","nico rosberg","romain grosjean","fernando alonso","lewis hamilton","paul di resta","adrian sutil","sergio perez","jean eric vergne"],
+        "Gran Premio de Estados Unidos": ["sebastian vettel","romain grosjean","mark webber","lewis hamilton","fernando alonso","nico hulkenberg","sergio perez","valtteri bottas","nico rosberg","jenson button"],
+        "Gran Premio de Brasil": ["sebastian vettel","mark webber","fernando alonso","jenson button","nico rosberg","sergio perez","felipe massa","nico hulkenberg","lewis hamilton","daniel ricciardo"]
     },
     2014: {
-        "Gran Premio de Gran Bretaña": ["lewis hamilton","valtteri bottas","daniel ricciardo","nico rosberg","sebastian vettel","kevin magnussen","jenson button","sergio perez","nico hulkenberg","felipe massa"],
-        "Gran Premio de Mónaco":       ["nico rosberg","lewis hamilton","daniel ricciardo","sebastian vettel","jenson button","romain grosjean","sergio perez","kevin magnussen","valtteri bottas","jean-eric vergne"],
-        "Gran Premio de Hungría":      ["daniel ricciardo","fernando alonso","lewis hamilton","sebastian vettel","romain grosjean","jenson button","kevin magnussen","valtteri bottas","nico rosberg","sergio perez"],
-        "Gran Premio de Italia":       ["lewis hamilton","nico rosberg","felipe massa","fernando alonso","sebastian vettel","jenson button","kevin magnussen","kimi raikkonen","valtteri bottas","sergio perez"],
-        "Gran Premio de Abu Dabi":     ["lewis hamilton","felipe massa","valtteri bottas","jenson button","sebastian vettel","kevin magnussen","sergio perez","nico hulkenberg","romain grosjean","jean-eric vergne"],
+        "Gran Premio de Australia": ["nico rosberg","kevin magnussen","jenson button","fernando alonso","valtteri bottas","nico hulkenberg","kimi raikkonen","jean eric vergne","daniil kvyat","sergio perez"],
+        "Gran Premio de Malasia": ["lewis hamilton","nico rosberg","sebastian vettel","fernando alonso","nico hulkenberg","jenson button","felipe massa","valtteri bottas","kevin magnussen","daniil kvyat"],
+        "Gran Premio de Bahréin": ["lewis hamilton","nico rosberg","sergio perez","daniel ricciardo","nico hulkenberg","sebastian vettel","felipe massa","valtteri bottas","fernando alonso","kimi raikkonen"],
+        "Gran Premio de China": ["lewis hamilton","nico rosberg","fernando alonso","daniel ricciardo","sebastian vettel","nico hulkenberg","valtteri bottas","kimi raikkonen","sergio perez","daniil kvyat"],
+        "Gran Premio de España": ["lewis hamilton","nico rosberg","daniel ricciardo","sebastian vettel","valtteri bottas","fernando alonso","kimi raikkonen","romain grosjean","sergio perez","nico hulkenberg"],
+        "Gran Premio de Mónaco": ["nico rosberg","lewis hamilton","daniel ricciardo","fernando alonso","nico hulkenberg","jenson button","felipe massa","romain grosjean","jules bianchi","kevin magnussen"],
+        "Gran Premio de Canadá": ["daniel ricciardo","nico rosberg","sebastian vettel","jenson button","nico hulkenberg","fernando alonso","valtteri bottas","jean eric vergne","kevin magnussen","kimi raikkonen"],
+        "Gran Premio de Austria": ["nico rosberg","lewis hamilton","valtteri bottas","felipe massa","fernando alonso","sergio perez","kevin magnussen","daniel ricciardo","nico hulkenberg","kimi raikkonen"],
+        "Gran Premio de Gran Bretaña": ["lewis hamilton","valtteri bottas","daniel ricciardo","jenson button","sebastian vettel","fernando alonso","kevin magnussen","nico hulkenberg","daniil kvyat","jean eric vergne"],
+        "Gran Premio de Alemania": ["nico rosberg","valtteri bottas","lewis hamilton","sebastian vettel","fernando alonso","daniel ricciardo","nico hulkenberg","jenson button","kevin magnussen","sergio perez"],
+        "Gran Premio de Hungría": ["daniel ricciardo","fernando alonso","lewis hamilton","nico rosberg","felipe massa","kimi raikkonen","sebastian vettel","valtteri bottas","jean eric vergne","jenson button"],
+        "Gran Premio de Bélgica": ["daniel ricciardo","nico rosberg","valtteri bottas","kimi raikkonen","sebastian vettel","fernando alonso","sergio perez","daniil kvyat","nico hulkenberg","jean eric vergne"],
+        "Gran Premio de Italia": ["lewis hamilton","nico rosberg","felipe massa","valtteri bottas","daniel ricciardo","sebastian vettel","sergio perez","jenson button","kimi raikkonen","kevin magnussen"],
+        "Gran Premio de Singapur": ["lewis hamilton","sebastian vettel","daniel ricciardo","fernando alonso","felipe massa","valtteri bottas","jean eric vergne","sergio perez","nico hulkenberg","kevin magnussen"],
+        "Gran Premio de Japón": ["lewis hamilton","nico rosberg","sebastian vettel","daniel ricciardo","valtteri bottas","felipe massa","jenson button","nico hulkenberg","jean eric vergne","sergio perez"],
+        "Gran Premio de Rusia": ["lewis hamilton","nico rosberg","valtteri bottas","jenson button","kevin magnussen","fernando alonso","daniel ricciardo","sebastian vettel","kimi raikkonen","sergio perez"],
+        "Gran Premio de Estados Unidos": ["lewis hamilton","nico rosberg","daniel ricciardo","felipe massa","valtteri bottas","fernando alonso","sebastian vettel","kevin magnussen","jean eric vergne","sergio perez"],
+        "Gran Premio de Brasil": ["nico rosberg","lewis hamilton","felipe massa","jenson button","sebastian vettel","fernando alonso","valtteri bottas","nico hulkenberg","kevin magnussen","sergio perez"],
+        "Gran Premio de Abu Dabi": ["lewis hamilton","felipe massa","valtteri bottas","daniel ricciardo","jenson button","nico rosberg","nico hulkenberg","sergio perez","sebastian vettel","fernando alonso"]
     },
     2015: {
-        "Gran Premio de Gran Bretaña": ["lewis hamilton","nico rosberg","sebastian vettel","romain grosjean","daniil kvyat","pastor maldonado","max verstappen","carlos sainz","jenson button","nico hulkenberg"],
-        "Gran Premio de Mónaco":       ["nico rosberg","sebastian vettel","lewis hamilton","pastor maldonado","romain grosjean","daniil kvyat","sergio perez","max verstappen","carlos sainz","jenson button"],
-        "Gran Premio de Hungría":      ["sebastian vettel","daniil kvyat","pastor maldonado","romain grosjean","sergio perez","max verstappen","nico rosberg","carlos sainz","jenson button","lewis hamilton"],
-        "Gran Premio de Italia":       ["lewis hamilton","sebastian vettel","romain grosjean","valtteri bottas","nico rosberg","daniil kvyat","max verstappen","carlos sainz","pastor maldonado","sergio perez"],
-        "Gran Premio de Japón":        ["lewis hamilton","nico rosberg","sebastian vettel","romain grosjean","valtteri bottas","daniil kvyat","sergio perez","max verstappen","pastor maldonado","carlos sainz"],
+        "Gran Premio de Australia": ["lewis hamilton","nico rosberg","sebastian vettel","felipe massa","felipe nasr","daniel ricciardo","nico hulkenberg","marcus ericsson","carlos sainz","sergio perez"],
+        "Gran Premio de Malasia": ["sebastian vettel","lewis hamilton","nico rosberg","kimi raikkonen","valtteri bottas","felipe massa","max verstappen","carlos sainz","daniel ricciardo","romain grosjean"],
+        "Gran Premio de China": ["lewis hamilton","nico rosberg","sebastian vettel","kimi raikkonen","valtteri bottas","felipe massa","daniel ricciardo","romain grosjean","felipe nasr","marcus ericsson"],
+        "Gran Premio de Bahréin": ["lewis hamilton","kimi raikkonen","nico rosberg","valtteri bottas","sebastian vettel","daniel ricciardo","romain grosjean","sergio perez","daniil kvyat","felipe massa"],
+        "Gran Premio de España": ["nico rosberg","lewis hamilton","sebastian vettel","valtteri bottas","kimi raikkonen","felipe massa","daniel ricciardo","romain grosjean","carlos sainz","daniil kvyat"],
+        "Gran Premio de Mónaco": ["nico rosberg","sebastian vettel","lewis hamilton","daniil kvyat","daniel ricciardo","kimi raikkonen","sergio perez","felipe nasr","carlos sainz","jenson button"],
+        "Gran Premio de Canadá": ["lewis hamilton","nico rosberg","valtteri bottas","kimi raikkonen","sebastian vettel","felipe massa","pastor maldonado","nico hulkenberg","daniil kvyat","romain grosjean"],
+        "Gran Premio de Austria": ["nico rosberg","lewis hamilton","felipe massa","valtteri bottas","sebastian vettel","felipe nasr","nico hulkenberg","daniel ricciardo","sergio perez","marcus ericsson"],
+        "Gran Premio de Gran Bretaña": ["lewis hamilton","nico rosberg","sebastian vettel","felipe massa","valtteri bottas","daniil kvyat","nico hulkenberg","kimi raikkonen","sergio perez","fernando alonso"],
+        "Gran Premio de Hungría": ["sebastian vettel","daniil kvyat","daniel ricciardo","max verstappen","fernando alonso","lewis hamilton","romain grosjean","nico rosberg","jenson button","marcus ericsson"],
+        "Gran Premio de Bélgica": ["lewis hamilton","nico rosberg","romain grosjean","daniil kvyat","sergio perez","felipe massa","kimi raikkonen","max verstappen","valtteri bottas","marcus ericsson"],
+        "Gran Premio de Italia": ["lewis hamilton","sebastian vettel","felipe massa","valtteri bottas","kimi raikkonen","sergio perez","nico hulkenberg","daniel ricciardo","marcus ericsson","felipe nasr"],
+        "Gran Premio de Singapur": ["sebastian vettel","daniel ricciardo","kimi raikkonen","nico rosberg","valtteri bottas","daniil kvyat","sergio perez","max verstappen","carlos sainz","pastor maldonado"],
+        "Gran Premio de Japón": ["lewis hamilton","nico rosberg","sebastian vettel","valtteri bottas","kimi raikkonen","nico hulkenberg","romain grosjean","felipe massa","max verstappen","carlos sainz"],
+        "Gran Premio de Rusia": ["lewis hamilton","sebastian vettel","sergio perez","felipe massa","daniil kvyat","felipe nasr","pastor maldonado","max verstappen","fernando alonso","romain grosjean"],
+        "Gran Premio de Estados Unidos": ["lewis hamilton","nico rosberg","sebastian vettel","max verstappen","sergio perez","jenson button","carlos sainz","pastor maldonado","felipe nasr","daniel ricciardo"],
+        "Gran Premio de México": ["nico rosberg","lewis hamilton","valtteri bottas","daniil kvyat","daniel ricciardo","felipe massa","nico hulkenberg","sergio perez","max verstappen","romain grosjean"],
+        "Gran Premio de Brasil": ["nico rosberg","lewis hamilton","sebastian vettel","kimi raikkonen","valtteri bottas","nico hulkenberg","daniil kvyat","romain grosjean","max verstappen","sergio perez"],
+        "Gran Premio de Abu Dabi": ["nico rosberg","lewis hamilton","kimi raikkonen","sebastian vettel","sergio perez","daniel ricciardo","nico hulkenberg","felipe massa","romain grosjean","daniil kvyat"]
     },
     2016: {
-        "Gran Premio de Gran Bretaña": ["lewis hamilton","max verstappen","nico rosberg","sergio perez","kimi raikkonen","romain grosjean","nico hulkenberg","valtteri bottas","daniil kvyat","carlos sainz"],
-        "Gran Premio de Mónaco":       ["lewis hamilton","daniel ricciardo","sergio perez","sebastian vettel","jenson button","daniil kvyat","carlos sainz","valtteri bottas","romain grosjean","kevin magnussen"],
-        "Gran Premio de España":       ["max verstappen","kimi raikkonen","sebastian vettel","carlos sainz","sergio perez","romain grosjean","daniil kvyat","nico hulkenberg","valtteri bottas","jenson button"],
-        "Gran Premio de Bélgica":      ["nico rosberg","daniel ricciardo","romain grosjean","kimi raikkonen","sebastian vettel","max verstappen","nico hulkenberg","valtteri bottas","sergio perez","daniil kvyat"],
-        "Gran Premio de Italia":       ["nico rosberg","sebastian vettel","kimi raikkonen","valtteri bottas","sergio perez","carlos sainz","nico hulkenberg","romain grosjean","daniil kvyat","kevin magnussen"],
-        "Gran Premio de Abu Dabi":     ["lewis hamilton","nico rosberg","sebastian vettel","kimi raikkonen","valtteri bottas","max verstappen","sergio perez","carlos sainz","nico hulkenberg","esteban ocon"],
+        "Gran Premio de Australia": ["nico rosberg","lewis hamilton","sebastian vettel","daniel ricciardo","felipe massa","romain grosjean","nico hulkenberg","valtteri bottas","carlos sainz","max verstappen"],
+        "Gran Premio de Bahréin": ["nico rosberg","kimi raikkonen","lewis hamilton","daniel ricciardo","romain grosjean","max verstappen","daniil kvyat","felipe massa","valtteri bottas","stoffel vandoorne"],
+        "Gran Premio de China": ["nico rosberg","sebastian vettel","daniil kvyat","daniel ricciardo","kimi raikkonen","felipe massa","max verstappen","carlos sainz","valtteri bottas","sergio perez"],
+        "Gran Premio de Rusia": ["nico rosberg","lewis hamilton","kimi raikkonen","valtteri bottas","felipe massa","fernando alonso","kevin magnussen","romain grosjean","sergio perez","jenson button"],
+        "Gran Premio de España": ["max verstappen","kimi raikkonen","sebastian vettel","daniel ricciardo","valtteri bottas","carlos sainz","sergio perez","felipe massa","jenson button","daniil kvyat"],
+        "Gran Premio de Mónaco": ["lewis hamilton","daniel ricciardo","sergio perez","sebastian vettel","fernando alonso","nico hulkenberg","nico rosberg","carlos sainz","jenson button","felipe massa"],
+        "Gran Premio de Canadá": ["lewis hamilton","sebastian vettel","valtteri bottas","max verstappen","nico rosberg","kimi raikkonen","daniel ricciardo","nico hulkenberg","carlos sainz","sergio perez"],
+        "Gran Premio de Azerbaiyán": ["nico rosberg","sebastian vettel","sergio perez","kimi raikkonen","lewis hamilton","valtteri bottas","daniel ricciardo","max verstappen","nico hulkenberg","felipe massa"],
+        "Gran Premio de Austria": ["lewis hamilton","max verstappen","kimi raikkonen","daniel ricciardo","jenson button","romain grosjean","carlos sainz","valtteri bottas","pascal wehrlein","esteban gutierrez"],
+        "Gran Premio de Gran Bretaña": ["lewis hamilton","nico rosberg","max verstappen","daniel ricciardo","kimi raikkonen","sergio perez","nico hulkenberg","carlos sainz","sebastian vettel","daniil kvyat"],
+        "Gran Premio de Hungría": ["lewis hamilton","nico rosberg","daniel ricciardo","sebastian vettel","max verstappen","kimi raikkonen","fernando alonso","carlos sainz","valtteri bottas","nico hulkenberg"],
+        "Gran Premio de Alemania": ["lewis hamilton","daniel ricciardo","max verstappen","nico rosberg","sebastian vettel","kimi raikkonen","nico hulkenberg","jenson button","valtteri bottas","sergio perez"],
+        "Gran Premio de Bélgica": ["nico rosberg","daniel ricciardo","lewis hamilton","nico hulkenberg","sergio perez","sebastian vettel","fernando alonso","valtteri bottas","kimi raikkonen","felipe massa"],
+        "Gran Premio de Italia": ["nico rosberg","lewis hamilton","sebastian vettel","kimi raikkonen","daniel ricciardo","valtteri bottas","max verstappen","sergio perez","felipe massa","nico hulkenberg"],
+        "Gran Premio de Singapur": ["nico rosberg","daniel ricciardo","lewis hamilton","kimi raikkonen","sebastian vettel","max verstappen","fernando alonso","sergio perez","daniil kvyat","kevin magnussen"],
+        "Gran Premio de Malasia": ["daniel ricciardo","max verstappen","nico rosberg","sebastian vettel","sergio perez","fernando alonso","nico hulkenberg","jenson button","valtteri bottas","felipe massa"],
+        "Gran Premio de Japón": ["nico rosberg","max verstappen","lewis hamilton","daniel ricciardo","sebastian vettel","sergio perez","romain grosjean","felipe massa","carlos sainz","daniil kvyat"],
+        "Gran Premio de Estados Unidos": ["lewis hamilton","nico rosberg","daniel ricciardo","sebastian vettel","fernando alonso","carlos sainz","felipe massa","sergio perez","jenson button","romain grosjean"],
+        "Gran Premio de México": ["lewis hamilton","nico rosberg","max verstappen","sebastian vettel","daniel ricciardo","kimi raikkonen","nico hulkenberg","valtteri bottas","felipe massa","sergio perez"],
+        "Gran Premio de Brasil": ["lewis hamilton","nico rosberg","max verstappen","sergio perez","sebastian vettel","carlos sainz","nico hulkenberg","daniel ricciardo","felipe massa","fernando alonso"],
+        "Gran Premio de Abu Dabi": ["lewis hamilton","nico rosberg","sebastian vettel","max verstappen","daniel ricciardo","kimi raikkonen","nico hulkenberg","sergio perez","felipe massa","fernando alonso"],
     },
     2017: {
-        "Gran Premio de Gran Bretaña": ["lewis hamilton","valtteri bottas","kimi raikkonen","sebastian vettel","carlos sainz","max verstappen","lance stroll","esteban ocon","felipe massa","nico hulkenberg"],
-        "Gran Premio de Mónaco":       ["sebastian vettel","kimi raikkonen","daniel ricciardo","carlos sainz","sergio perez","jenson button","lance stroll","esteban ocon","daniil kvyat","felipe massa"],
-        "Gran Premio de España":       ["lewis hamilton","valtteri bottas","daniel ricciardo","sebastian vettel","kimi raikkonen","max verstappen","sergio perez","esteban ocon","carlos sainz","felipe massa"],
-        "Gran Premio de Italia":       ["lewis hamilton","valtteri bottas","sebastian vettel","kimi raikkonen","max verstappen","esteban ocon","carlos sainz","nico hulkenberg","sergio perez","daniel ricciardo"],
-        "Gran Premio de Japón":        ["lewis hamilton","max verstappen","sebastian vettel","esteban ocon","carlos sainz","valtteri bottas","sergio perez","kimi raikkonen","lance stroll","felipe massa"],
-        "Gran Premio de Abu Dabi":     ["valtteri bottas","lewis hamilton","sebastian vettel","kimi raikkonen","max verstappen","sergio perez","esteban ocon","lance stroll","carlos sainz","nico hulkenberg"],
+        "Gran Premio de Australia": ["sebastian vettel","lewis hamilton","valtteri bottas","kimi raikkonen","max verstappen","felipe massa","sergio perez","carlos sainz","daniil kvyat","esteban ocon"],
+        "Gran Premio de China": ["lewis hamilton","sebastian vettel","max verstappen","daniel ricciardo","kimi raikkonen","valtteri bottas","carlos sainz","kevin magnussen","sergio perez","esteban ocon"],
+        "Gran Premio de Bahréin": ["sebastian vettel","lewis hamilton","valtteri bottas","kimi raikkonen","daniel ricciardo","felipe massa","sergio perez","romain grosjean","nico hulkenberg","esteban ocon"],
+        "Gran Premio de Rusia": ["valtteri bottas","sebastian vettel","kimi raikkonen","lewis hamilton","max verstappen","sergio perez","esteban ocon","nico hulkenberg","felipe massa","carlos sainz"],
+        "Gran Premio de España": ["lewis hamilton","sebastian vettel","daniel ricciardo","sergio perez","esteban ocon","nico hulkenberg","carlos sainz","pascal wehrlein","daniil kvyat","romain grosjean"],
+        "Gran Premio de Mónaco": ["sebastian vettel","kimi raikkonen","daniel ricciardo","valtteri bottas","max verstappen","carlos sainz","lewis hamilton","romain grosjean","felipe massa","kevin magnussen"],
+        "Gran Premio de Canadá": ["lewis hamilton","valtteri bottas","daniel ricciardo","sebastian vettel","sergio perez","esteban ocon","nico hulkenberg","lance stroll","max verstappen","carlos sainz"],
+        "Gran Premio de Azerbaiyán": ["daniel ricciardo","valtteri bottas","lance stroll","sebastian vettel","lewis hamilton","esteban ocon","kevin magnussen","carlos sainz","fernando alonso","pascal wehrlein"],
+        "Gran Premio de Austria": ["valtteri bottas","sebastian vettel","daniel ricciardo","lewis hamilton","kimi raikkonen","romain grosjean","sergio perez","esteban ocon","felipe massa","lance stroll"],
+        "Gran Premio de Gran Bretaña": ["lewis hamilton","valtteri bottas","kimi raikkonen","max verstappen","daniel ricciardo","nico hulkenberg","esteban ocon","sergio perez","felipe massa","sebastian vettel"],
+        "Gran Premio de Hungría": ["sebastian vettel","kimi raikkonen","valtteri bottas","lewis hamilton","max verstappen","fernando alonso","carlos sainz","sergio perez","esteban ocon","stoffel vandoorne"],
+        "Gran Premio de Bélgica": ["lewis hamilton","sebastian vettel","daniel ricciardo","kimi raikkonen","valtteri bottas","nico hulkenberg","romain grosjean","felipe massa","esteban ocon","carlos sainz"],
+        "Gran Premio de Italia": ["lewis hamilton","valtteri bottas","sebastian vettel","daniel ricciardo","kimi raikkonen","esteban ocon","lance stroll","felipe massa","sergio perez","max verstappen"],
+        "Gran Premio de Singapur": ["lewis hamilton","daniel ricciardo","valtteri bottas","kimi raikkonen","sebastian vettel","stoffel vandoorne","nico hulkenberg","carlos sainz","sergio perez","esteban ocon"],
+        "Gran Premio de Malasia": ["max verstappen","lewis hamilton","daniel ricciardo","sebastian vettel","valtteri bottas","sergio perez","stoffel vandoorne","lance stroll","felipe massa","esteban ocon"],
+        "Gran Premio de Japón": ["lewis hamilton","max verstappen","daniel ricciardo","valtteri bottas","kimi raikkonen","esteban ocon","sergio perez","kevin magnussen","romain grosjean","felipe massa"],
+        "Gran Premio de Estados Unidos": ["lewis hamilton","sebastian vettel","kimi raikkonen","max verstappen","valtteri bottas","esteban ocon","carlos sainz","sergio perez","felipe massa","daniil kvyat"],
+        "Gran Premio de México": ["max verstappen","valtteri bottas","kimi raikkonen","sebastian vettel","esteban ocon","lance stroll","sergio perez","kevin magnussen","lewis hamilton","fernando alonso"],
+        "Gran Premio de Brasil": ["sebastian vettel","valtteri bottas","kimi raikkonen","lewis hamilton","max verstappen","daniel ricciardo","felipe massa","fernando alonso","sergio perez","nico hulkenberg"],
+        "Gran Premio de Abu Dabi": ["valtteri bottas","lewis hamilton","sebastian vettel","kimi raikkonen","max verstappen","nico hulkenberg","sergio perez","esteban ocon","fernando alonso","felipe massa"],
     },
     2018: {
-        "Gran Premio de Gran Bretaña": ["sebastian vettel","lewis hamilton","kimi raikkonen","valtteri bottas","romain grosjean","kevin magnussen","esteban ocon","carlos sainz","fernando alonso","lance stroll"],
-        "Gran Premio de Mónaco":       ["daniel ricciardo","sebastian vettel","lewis hamilton","kimi raikkonen","max verstappen","valtteri bottas","fernando alonso","carlos sainz","esteban ocon","nico hulkenberg"],
-        "Gran Premio de Hungría":      ["lewis hamilton","sebastian vettel","kimi raikkonen","valtteri bottas","romain grosjean","carlos sainz","kevin magnussen","esteban ocon","max verstappen","charles leclerc"],
-        "Gran Premio de Italia":       ["lewis hamilton","kimi raikkonen","valtteri bottas","romain grosjean","esteban ocon","kevin magnussen","carlos sainz","sebastian vettel","lance stroll","sergio perez"],
-        "Gran Premio de Abu Dabi":     ["lewis hamilton","max verstappen","carlos sainz","valtteri bottas","sebastian vettel","kimi raikkonen","kevin magnussen","romain grosjean","fernando alonso","lance stroll"],
+        "Gran Premio de Australia": ["sebastian vettel","lewis hamilton","kimi raikkonen","daniel ricciardo","fernando alonso","max verstappen","nico hulkenberg","valtteri bottas","stoffel vandoorne","carlos sainz"],
+        "Gran Premio de Bahréin": ["sebastian vettel","valtteri bottas","lewis hamilton","pierre gasly","kevin magnussen","nico hulkenberg","fernando alonso","stoffel vandoorne","marcus ericsson","esteban ocon"],
+        "Gran Premio de China": ["daniel ricciardo","valtteri bottas","kimi raikkonen","lewis hamilton","max verstappen","nico hulkenberg","fernando alonso","sebastian vettel","carlos sainz","kevin magnussen"],
+        "Gran Premio de Azerbaiyán": ["lewis hamilton","kimi raikkonen","sergio perez","sebastian vettel","carlos sainz","charles leclerc","fernando alonso","lance stroll","stoffel vandoorne","brendon hartley"],
+        "Gran Premio de España": ["lewis hamilton","valtteri bottas","max verstappen","sebastian vettel","daniel ricciardo","kevin magnussen","carlos sainz","fernando alonso","sergio perez","charles leclerc"],
+        "Gran Premio de Mónaco": ["daniel ricciardo","sebastian vettel","lewis hamilton","kimi raikkonen","valtteri bottas","esteban ocon","pierre gasly","nico hulkenberg","max verstappen","carlos sainz"],
+        "Gran Premio de Canadá": ["sebastian vettel","valtteri bottas","max verstappen","daniel ricciardo","lewis hamilton","kimi raikkonen","nico hulkenberg","carlos sainz","esteban ocon","charles leclerc"],
+        "Gran Premio de Francia": ["lewis hamilton","max verstappen","kimi raikkonen","daniel ricciardo","sebastian vettel","kevin magnussen","valtteri bottas","carlos sainz","nico hulkenberg","charles leclerc"],
+        "Gran Premio de Austria": ["max verstappen","kimi raikkonen","sebastian vettel","romain grosjean","kevin magnussen","esteban ocon","sergio perez","fernando alonso","charles leclerc","marcus ericsson"],
+        "Gran Premio de Gran Bretaña": ["sebastian vettel","lewis hamilton","kimi raikkonen","valtteri bottas","daniel ricciardo","nico hulkenberg","esteban ocon","fernando alonso","kevin magnussen","pierre gasly"],
+        "Gran Premio de Alemania": ["lewis hamilton","valtteri bottas","kimi raikkonen","max verstappen","nico hulkenberg","romain grosjean","sergio perez","esteban ocon","marcus ericsson","brendon hartley"],
+        "Gran Premio de Hungría": ["lewis hamilton","sebastian vettel","kimi raikkonen","daniel ricciardo","valtteri bottas","pierre gasly","kevin magnussen","fernando alonso","carlos sainz","romain grosjean"],
+        "Gran Premio de Bélgica": ["sebastian vettel","lewis hamilton","max verstappen","valtteri bottas","sergio perez","esteban ocon","romain grosjean","kevin magnussen","pierre gasly","marcus ericsson"],
+        "Gran Premio de Italia": ["lewis hamilton","kimi raikkonen","valtteri bottas","sebastian vettel","max verstappen","romain grosjean","esteban ocon","sergio perez","carlos sainz","lance stroll"],
+        "Gran Premio de Singapur": ["lewis hamilton","max verstappen","sebastian vettel","valtteri bottas","kimi raikkonen","daniel ricciardo","fernando alonso","carlos sainz","charles leclerc","nico hulkenberg"],
+        "Gran Premio de Rusia": ["lewis hamilton","valtteri bottas","sebastian vettel","kimi raikkonen","max verstappen","daniel ricciardo","charles leclerc","kevin magnussen","esteban ocon","sergio perez"],
+        "Gran Premio de Japón": ["lewis hamilton","valtteri bottas","max verstappen","daniel ricciardo","kimi raikkonen","sebastian vettel","sergio perez","romain grosjean","esteban ocon","carlos sainz"],
+        "Gran Premio de Estados Unidos": ["kimi raikkonen","max verstappen","lewis hamilton","daniel ricciardo","valtteri bottas","nico hulkenberg","carlos sainz","esteban ocon","kevin magnussen","sergio perez"],
+        "Gran Premio de México": ["max verstappen","sebastian vettel","kimi raikkonen","lewis hamilton","valtteri bottas","nico hulkenberg","charles leclerc","stoffel vandoorne","marcus ericsson","pierre gasly"],
+        "Gran Premio de Brasil": ["lewis hamilton","max verstappen","kimi raikkonen","daniel ricciardo","valtteri bottas","sebastian vettel","charles leclerc","romain grosjean","kevin magnussen","sergio perez"],
+        "Gran Premio de Abu Dabi": ["lewis hamilton","sebastian vettel","max verstappen","daniel ricciardo","valtteri bottas","carlos sainz","charles leclerc","sergio perez","romain grosjean","kevin magnussen"],
     },
     2019: {
-        "Gran Premio de Gran Bretaña": ["valtteri bottas","lewis hamilton","charles leclerc","pierre gasly","sebastian vettel","carlos sainz","kevin magnussen","daniil kvyat","lando norris","lance stroll"],
-        "Gran Premio de Mónaco":       ["lewis hamilton","sebastian vettel","max verstappen","charles leclerc","valtteri bottas","pierre gasly","carlos sainz","lando norris","nico hulkenberg","antonio giovinazzi"],
-        "Gran Premio de España":       ["lewis hamilton","valtteri bottas","max verstappen","sebastian vettel","charles leclerc","pierre gasly","carlos sainz","kimi raikkonen","lando norris","kevin magnussen"],
-        "Gran Premio de Italia":       ["charles leclerc","valtteri bottas","lewis hamilton","pierre gasly","carlos sainz","kimi raikkonen","lando norris","lance stroll","nico hulkenberg","antonio giovinazzi"],
-        "Gran Premio de Brasil":       ["max verstappen","pierre gasly","carlos sainz","lewis hamilton","sebastian vettel","nico hulkenberg","valtteri bottas","lando norris","lance stroll","kevin magnussen"],
-        "Gran Premio de Abu Dabi":     ["lewis hamilton","max verstappen","charles leclerc","sebastian vettel","valtteri bottas","pierre gasly","lando norris","carlos sainz","nico hulkenberg","daniil kvyat"],
+        "Gran Premio de Australia": ["valtteri bottas","lewis hamilton","max verstappen","sebastian vettel","charles leclerc","kevin magnussen","nico hulkenberg","kimi raikkonen","lance stroll","daniil kvyat"],
+        "Gran Premio de Bahréin": ["lewis hamilton","valtteri bottas","charles leclerc","max verstappen","sebastian vettel","lando norris","kimi raikkonen","pierre gasly","alexander albon","sergio perez"],
+        "Gran Premio de China": ["lewis hamilton","valtteri bottas","sebastian vettel","max verstappen","charles leclerc","pierre gasly","daniel ricciardo","sergio perez","kimi raikkonen","alexander albon"],
+        "Gran Premio de Azerbaiyán": ["valtteri bottas","lewis hamilton","sebastian vettel","max verstappen","charles leclerc","sergio perez","carlos sainz","lando norris","lance stroll","kimi raikkonen"],
+        "Gran Premio de España": ["lewis hamilton","valtteri bottas","max verstappen","sebastian vettel","charles leclerc","pierre gasly","kevin magnussen","carlos sainz","daniil kvyat","romain grosjean"],
+        "Gran Premio de Mónaco": ["lewis hamilton","sebastian vettel","valtteri bottas","max verstappen","pierre gasly","carlos sainz","daniil kvyat","alexander albon","daniel ricciardo","romain grosjean"],
+        "Gran Premio de Canadá": ["lewis hamilton","sebastian vettel","charles leclerc","valtteri bottas","max verstappen","daniel ricciardo","nico hulkenberg","carlos sainz","sergio perez","lance stroll"],
+        "Gran Premio de Francia": ["lewis hamilton","valtteri bottas","charles leclerc","max verstappen","sebastian vettel","carlos sainz","daniel ricciardo","pierre gasly","kimi raikkonen","nico hulkenberg"],
+        "Gran Premio de Austria": ["max verstappen","charles leclerc","valtteri bottas","sebastian vettel","lewis hamilton","lando norris","pierre gasly","carlos sainz","kimi raikkonen","antonio giovinazzi"],
+        "Gran Premio de Gran Bretaña": ["lewis hamilton","valtteri bottas","charles leclerc","pierre gasly","max verstappen","carlos sainz","daniel ricciardo","kimi raikkonen","daniil kvyat","nico hulkenberg"],
+        "Gran Premio de Alemania": ["max verstappen","sebastian vettel","daniil kvyat","lance stroll","carlos sainz","alexander albon","kimi raikkonen","antonio giovinazzi","romain grosjean","kevin magnussen"],
+        "Gran Premio de Hungría": ["lewis hamilton","max verstappen","sebastian vettel","charles leclerc","carlos sainz","pierre gasly","kimi raikkonen","valtteri bottas","lando norris","alexander albon"],
+        "Gran Premio de Bélgica": ["charles leclerc","lewis hamilton","valtteri bottas","sebastian vettel","alexander albon","sergio perez","daniil kvyat","nico hulkenberg","pierre gasly","lance stroll"],
+        "Gran Premio de Italia": ["charles leclerc","valtteri bottas","lewis hamilton","daniel ricciardo","nico hulkenberg","alexander albon","sergio perez","max verstappen","antonio giovinazzi","lando norris"],
+        "Gran Premio de Singapur": ["sebastian vettel","charles leclerc","max verstappen","lewis hamilton","valtteri bottas","alexander albon","lando norris","pierre gasly","nico hulkenberg","antonio giovinazzi"],
+        "Gran Premio de Rusia": ["lewis hamilton","valtteri bottas","charles leclerc","max verstappen","alexander albon","carlos sainz","sergio perez","lando norris","kevin magnussen","nico hulkenberg"],
+        "Gran Premio de Japón": ["valtteri bottas","sebastian vettel","lewis hamilton","alexander albon","carlos sainz","charles leclerc","daniel ricciardo","pierre gasly","sergio perez","nico hulkenberg"],
+        "Gran Premio de México": ["lewis hamilton","sebastian vettel","valtteri bottas","charles leclerc","alexander albon","max verstappen","sergio perez","daniel ricciardo","daniil kvyat","pierre gasly"],
+        "Gran Premio de Estados Unidos": ["valtteri bottas","lewis hamilton","max verstappen","charles leclerc","alexander albon","daniel ricciardo","lando norris","carlos sainz","nico hulkenberg","sergio perez"],
+        "Gran Premio de Brasil": ["max verstappen","pierre gasly","carlos sainz","lewis hamilton","charles leclerc","alexander albon","valtteri bottas","sebastian vettel","lando norris","sergio perez"],
+        "Gran Premio de Abu Dabi": ["lewis hamilton","max verstappen","charles leclerc","valtteri bottas","sebastian vettel","alexander albon","sergio perez","lando norris","daniil kvyat","carlos sainz"]
     },
     2020: {
         "Gran Premio de Austria":         ["valtteri bottas","charles leclerc","lando norris","sebastian vettel","lance stroll","carlos sainz","esteban ocon","antonio giovinazzi","kimi raikkonen","george russell"],
@@ -1954,660 +3562,6 @@ _ALL_GP_DRIVERS = sorted({
 #    "pilotos_campeon": pilotos que fueron campeones con este equipo,
 #  }
 # ══════════════════════════════════════════════════════════════════
-RAW_CONSTRUCTORS = {
-    "ferrari": {
-        "nac": "italiana", "epocas": [1950,1960,1970,1980,1990,2000,2010,2020],
-        "motores": ["ferrari"],
-        "titles": 16, "wins": 243,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","barcelona","bahrain","abu dhabi","budapest","melbourne","shanghai","interlagos","mexico","baku","singapore","zandvoort","imola","portimao","jeddah","montreal","hockenheim","nurburgring","austria","istanbul","valencia"],
-        "pilotos_campeon": ["juan manuel fangio","mike hawthorn","phil hill","john surtees","niki lauda","jody scheckter","michael schumacher","kimi raikkonen"],
-    },
-    "mercedes": {
-        "nac": "alemana", "epocas": [1950,2010,2020],
-        "motores": ["mercedes"],
-        "titles": 8, "wins": 125,
-        "circuitos_victoria": ["monaco","silverstone","spa","suzuka","barcelona","bahrain","abu dhabi","budapest","melbourne","shanghai","interlagos","mexico","baku","singapore","zandvoort","imola","portimao","jeddah","montreal","austria","istanbul","nurburgring","sochi","mugello","istanbul","eifel","70th anniversary","styria","sakhir","bahrain","las vegas","qatar"],
-        "pilotos_campeon": ["lewis hamilton","nico rosberg"],
-    },
-    "red bull": {
-        "nac": "austriaca", "epocas": [2000,2010,2020],
-        "motores": ["renault","honda","rbpt"],
-        "titles": 7, "wins": 120,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","barcelona","bahrain","abu dhabi","budapest","melbourne","shanghai","interlagos","mexico","baku","singapore","zandvoort","imola","portimao","jeddah","montreal","austria","istanbul","nurburgring","malaysia","china","japan","qatar","las vegas"],
-        "pilotos_campeon": ["sebastian vettel","max verstappen"],
-    },
-    "mclaren": {
-        "nac": "británica", "epocas": [1960,1970,1980,1990,2000,2010,2020],
-        "motores": ["ford","cosworth","chevrolet","ford","tag","honda","ford","mercedes","renault","mercedes","mercedes"],
-        "titles": 8, "wins": 183,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","barcelona","bahrain","abu dhabi","budapest","melbourne","shanghai","interlagos","mexico","baku","singapore","canada","austria","malaysia","japan","san marino","imola","portimao","jeddah","las vegas","miami","zandvoort","qatar","sao paulo","saudi arabia","australia"],
-        "pilotos_campeon": ["emerson fittipaldi","james hunt","niki lauda","alain prost","ayrton senna","mika hakkinen","lewis hamilton"],
-    },
-    "williams": {
-        "nac": "británica", "epocas": [1970,1980,1990,2000,2010,2020],
-        "motores": ["ford","cosworth","ford","toyota","renault","bmw","toyota","renault","mercedes","mercedes"],
-        "titles": 9, "wins": 114,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","barcelona","bahrain","abu dhabi","budapest","melbourne","interlagos","canada","austria","japan","san marino","imola","nurburgring","hockenheim","portugal","france","brazil"],
-        "pilotos_campeon": ["alan jones","keke rosberg","nelson piquet","nigel mansell","alain prost","damon hill","jacques villeneuve"],
-    },
-    "renault": {
-        "nac": "francesa", "epocas": [1970,1980,2000,2010,2020],
-        "motores": ["renault"],
-        "titles": 2, "wins": 35,
-        "circuitos_victoria": ["monaco","spa","suzuka","barcelona","bahrain","budapest","malaysia","japan","san marino","imola","nurburgring","hockenheim","austria","france","australia","canada","malaysia","bahrain","china","turkey","singapore","australia"],
-        "pilotos_campeon": ["fernando alonso"],
-    },
-    "alpine": {
-        "nac": "francesa", "epocas": [2020],
-        "motores": ["renault"],
-        "titles": 0, "wins": 1,
-        "circuitos_victoria": ["hungary"],
-        "pilotos_campeon": [],
-    },
-    "lotus": {
-        "nac": "británica", "epocas": [1950,1960,1970,1980],
-        "motores": ["climax","ford","cosworth","renault"],
-        "titles": 7, "wins": 79,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","france","germany","netherlands","south africa","canada","austria","argentina","brazil","usa","portugal"],
-        "pilotos_campeon": ["jim clark","jochen rindt","emerson fittipaldi","mario andretti"],
-    },
-    "brabham": {
-        "nac": "británica", "epocas": [1960,1970,1980],
-        "motores": ["climax","repco","ford","alfa romeo","cosworth","bmw"],
-        "titles": 4, "wins": 35,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","netherlands","south africa","canada","austria","argentina"],
-        "pilotos_campeon": ["jack brabham","denny hulme","nelson piquet"],
-    },
-    "tyrrell": {
-        "nac": "británica", "epocas": [1960,1970,1980,1990],
-        "motores": ["ford","cosworth","renault","yamaha"],
-        "titles": 3, "wins": 23,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","netherlands","south africa","canada","austria","argentina","usa"],
-        "pilotos_campeon": ["jackie stewart"],
-    },
-    "benetton": {
-        "nac": "británica", "epocas": [1980,1990,2000],
-        "motores": ["bmw","ford","cosworth","renault","playlife"],
-        "titles": 2, "wins": 27,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","barcelona","hungary","japan","portugal","australia","canada","belgium","france","germany","san marino"],
-        "pilotos_campeon": ["michael schumacher"],
-    },
-    "alfa romeo": {
-        "nac": "italiana", "epocas": [1950,2010,2020],
-        "motores": ["alfa romeo","ferrari"],
-        "titles": 2, "wins": 11,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","switzerland","belgium"],
-        "pilotos_campeon": ["giuseppe farina","juan manuel fangio"],
-    },
-    "cooper": {
-        "nac": "británica", "epocas": [1950,1960],
-        "motores": ["climax","maserati"],
-        "titles": 2, "wins": 16,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","netherlands","south africa","usa","argentina"],
-        "pilotos_campeon": ["jack brabham","bruce mclaren"],
-    },
-    "brm": {
-        "nac": "británica", "epocas": [1950,1960,1970],
-        "motores": ["brm"],
-        "titles": 1, "wins": 17,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","netherlands","south africa","usa"],
-        "pilotos_campeon": ["graham hill"],
-    },
-    "matra": {
-        "nac": "francesa", "epocas": [1960,1970],
-        "motores": ["ford","cosworth","matra"],
-        "titles": 1, "wins": 9,
-        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","netherlands","south africa","usa","canada"],
-        "pilotos_campeon": ["jackie stewart"],
-    },
-    "march": {
-        "nac": "británica", "epocas": [1970,1980],
-        "motores": ["ford","cosworth","alfa romeo"],
-        "titles": 0, "wins": 3,
-        "circuitos_victoria": ["silvertone","france","sweden"],
-        "pilotos_campeon": [],
-    },
-    "hesketh": {
-        "nac": "británica", "epocas": [1970],
-        "motores": ["ford","cosworth"],
-        "titles": 0, "wins": 1,
-        "circuitos_victoria": ["netherlands"],
-        "pilotos_campeon": [],
-    },
-    "wolf": {
-        "nac": "canadiense", "epocas": [1970],
-        "motores": ["ford","cosworth"],
-        "titles": 0, "wins": 3,
-        "circuitos_victoria": ["argentina","monaco","canada"],
-        "pilotos_campeon": [],
-    },
-    "shadow": {
-        "nac": "estadounidense", "epocas": [1970],
-        "motores": ["ford","cosworth"],
-        "titles": 0, "wins": 1,
-        "circuitos_victoria": ["austria"],
-        "pilotos_campeon": [],
-    },
-    "ligier": {
-        "nac": "francesa", "epocas": [1970,1980,1990],
-        "motores": ["matra","ford","cosworth","renault","lamborghini","mugen"],
-        "titles": 0, "wins": 9,
-        "circuitos_victoria": ["sweden","argentina","brazil","spain","long beach","monaco","austria","canada","netherlands"],
-        "pilotos_campeon": [],
-    },
-    "arrows": {
-        "nac": "británica", "epocas": [1970,1980,1990,2000],
-        "motores": ["ford","cosworth","bmw","megatron","ford","hart","yamaha","arrows","supertec","asiatech"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "minardi": {
-        "nac": "italiana", "epocas": [1980,1990,2000],
-        "motores": ["ford","motori moderni","lamborghini","ferrari","ford","cosworth","asiatech"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "jordan": {
-        "nac": "irlandesa", "epocas": [1990,2000],
-        "motores": ["ford","cosworth","yamaha","peugeot","mugen","honda","ford","bridgestone"],
-        "titles": 0, "wins": 4,
-        "circuitos_victoria": ["spa","monza","nurburgring","brazil","hungary"],
-        "pilotos_campeon": [],
-    },
-    "sauber": {
-        "nac": "suiza", "epocas": [1990,2000,2010,2020],
-        "motores": ["ilmor","mercedes","petronas","ferrari","bmw","ferrari","honda","ferrari"],
-        "titles": 0, "wins": 1,
-        "circuitos_victoria": ["canada"],
-        "pilotos_campeon": [],
-    },
-    "bar": {
-        "nac": "británica", "epocas": [1990,2000],
-        "motores": ["supertec","honda"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "honda": {
-        "nac": "japonesa", "epocas": [1960,2000],
-        "motores": ["honda"],
-        "titles": 0, "wins": 3,
-        "circuitos_victoria": ["mexico","italy","hungary"],
-        "pilotos_campeon": [],
-    },
-    "brawn gp": {
-        "nac": "británica", "epocas": [2000],
-        "motores": ["mercedes"],
-        "titles": 1, "wins": 8,
-        "circuitos_victoria": ["bahrain","australia","monaco","turkey","silverstone","valencia","brazil","japan"],
-        "pilotos_campeon": ["jenson button"],
-    },
-    "force india": {
-        "nac": "india", "epocas": [2000,2010],
-        "motores": ["ferrari","mercedes"],
-        "titles": 0, "wins": 3,
-        "circuitos_victoria": ["spa","bahrain","monza"],
-        "pilotos_campeon": [],
-    },
-    "racing point": {
-        "nac": "británica", "epocas": [2010,2020],
-        "motores": ["mercedes"],
-        "titles": 0, "wins": 1,
-        "circuitos_victoria": ["sakhir"],
-        "pilotos_campeon": [],
-    },
-    "aston martin": {
-        "nac": "británica", "epocas": [2020],
-        "motores": ["mercedes"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "haas": {
-        "nac": "estadounidense", "epocas": [2010,2020],
-        "motores": ["ferrari"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "toro rosso": {
-        "nac": "italiana", "epocas": [2000,2010],
-        "motores": ["cosworth","ferrari","renault","honda"],
-        "titles": 0, "wins": 1,
-        "circuitos_victoria": ["monza"],
-        "pilotos_campeon": [],
-    },
-    "alphatauri": {
-        "nac": "italiana", "epocas": [2010,2020],
-        "motores": ["honda","renault"],
-        "titles": 0, "wins": 2,
-        "circuitos_victoria": ["monza","bahrain"],
-        "pilotos_campeon": [],
-    },
-    "rb": {
-        "nac": "italiana", "epocas": [2020],
-        "motores": ["honda"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "toyota": {
-        "nac": "japonesa", "epocas": [2000,2010],
-        "motores": ["toyota"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "bmw sauber": {
-        "nac": "alemana", "epocas": [2000],
-        "motores": ["bmw"],
-        "titles": 0, "wins": 1,
-        "circuitos_victoria": ["canada"],
-        "pilotos_campeon": [],
-    },
-    "super aguri": {
-        "nac": "japonesa", "epocas": [2000],
-        "motores": ["honda"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "virgin": {
-        "nac": "británica", "epocas": [2010],
-        "motores": ["cosworth"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "hrt": {
-        "nac": "española", "epocas": [2010],
-        "motores": ["cosworth"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "caterham": {
-        "nac": "británica", "epocas": [2010],
-        "motores": ["renault"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "marussia": {
-        "nac": "británica", "epocas": [2010],
-        "motores": ["cosworth","ferrari"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "maserati": {
-        "nac": "italiana", "epocas": [1950],
-        "motores": ["maserati"],
-        "titles": 1, "wins": 9,
-        "circuitos_victoria": ["argentina","belgium","france","germany","monaco","italy","pescara","morocco"],
-        "pilotos_campeon": ["juan manuel fangio"],
-    },
-    "vanwall": {
-        "nac": "británica", "epocas": [1950],
-        "motores": ["vanwall"],
-        "titles": 1, "wins": 9,
-        "circuitos_victoria": ["silverstone","aintree","pescara","monza","spa","nurburgring","casablanca","morocco","france"],
-        "pilotos_campeon": [],
-    },
-    "lancia": {
-        "nac": "italiana", "epocas": [1950],
-        "motores": ["lancia"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "benetton ford": {
-        "nac": "británica", "epocas": [1990],
-        "motores": ["ford"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "stewart": {
-        "nac": "británica", "epocas": [1990],
-        "motores": ["ford"],
-        "titles": 0, "wins": 1,
-        "circuitos_victoria": ["monaco"],
-        "pilotos_campeon": [],
-    },
-    "prost": {
-        "nac": "francesa", "epocas": [1990,2000],
-        "motores": ["mugen","peugeot","ferrari"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "techeetah": {
-        "nac": "francesa", "epocas": [2010,2020],
-        "motores": ["renault"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "williams bmw": {
-        "nac": "británica", "epocas": [2000],
-        "motores": ["bmw"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "kick sauber": {
-        "nac": "suiza", "epocas": [2020],
-        "motores": ["ferrari"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    # ── Equipos históricos adicionales ───────────────────────────
-    "eagle": {
-        "nac": "estadounidense", "epocas": [1960],
-        "motores": ["climax","weslake"],
-        "titles": 0, "wins": 1,
-        "circuitos_victoria": ["spa"],
-        "pilotos_campeon": [],
-    },
-    "honda ra272": {
-        "nac": "japonesa", "epocas": [1960],
-        "motores": ["honda"],
-        "titles": 0, "wins": 1,
-        "circuitos_victoria": ["mexico"],
-        "pilotos_campeon": [],
-    },
-    "parnelli": {
-        "nac": "estadounidense", "epocas": [1970],
-        "motores": ["ford","cosworth"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "ensign": {
-        "nac": "británica", "epocas": [1970,1980],
-        "motores": ["ford","cosworth"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "fittipaldi": {
-        "nac": "brasileña", "epocas": [1970,1980],
-        "motores": ["ford","cosworth"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "osella": {
-        "nac": "italiana", "epocas": [1980],
-        "motores": ["ford","cosworth","alfa romeo"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "ats": {
-        "nac": "alemana", "epocas": [1970,1980],
-        "motores": ["ford","cosworth","bmw"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "lola": {
-        "nac": "británica", "epocas": [1960,1970,1980,1990],
-        "motores": ["climax","ford","cosworth","lamborghini","ferrari","ford"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "pacific": {
-        "nac": "británica", "epocas": [1990],
-        "motores": ["ford","cosworth","ilmor"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "simtek": {
-        "nac": "británica", "epocas": [1990],
-        "motores": ["ford","cosworth"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "footwork": {
-        "nac": "británica", "epocas": [1990],
-        "motores": ["ford","cosworth","hart","yamaha"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "dallara": {
-        "nac": "italiana", "epocas": [1990],
-        "motores": ["ford","cosworth"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "spyker": {
-        "nac": "neerlandesa", "epocas": [2000],
-        "motores": ["ferrari","honda"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "midland": {
-        "nac": "británica", "epocas": [2000],
-        "motores": ["toyota"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "aguri": {
-        "nac": "japonesa", "epocas": [2000],
-        "motores": ["honda"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-    "manor": {
-        "nac": "británica", "epocas": [2010],
-        "motores": ["ferrari","mercedes"],
-        "titles": 0, "wins": 0,
-        "circuitos_victoria": [],
-        "pilotos_campeon": [],
-    },
-}
-
-def _build_constructor_categories():
-    """Genera todas las categorías jugables para el Constructor Challenge."""
-    cats = []
-
-    NAC_FLAGS = {
-        "italiana":"🇮🇹","alemana":"🇩🇪","británica":"🇬🇧","francesa":"🇫🇷",
-        "austriaca":"🇦🇹","japonesa":"🇯🇵","estadounidense":"🇺🇸","suiza":"🇨🇭",
-        "india":"🇮🇳","irlandesa":"🇮🇪","canadiense":"🇨🇦","española":"🇪🇸",
-        "brasileña":"🇧🇷","neerlandesa":"🇳🇱",
-    }
-    MOTOR_FLAGS = {
-        "ferrari":"🔴","mercedes":"⭐","renault":"🟡","honda":"🔵",
-        "ford":"🔧","cosworth":"🔩","bmw":"⚪","tag":"🏷️",
-    }
-
-    # 1. Nacionalidad
-    nacs = set(v["nac"] for v in RAW_CONSTRUCTORS.values())
-    for nac in sorted(nacs):
-        flag = NAC_FLAGS.get(nac, "🏁")
-        teams = [t for t, v in RAW_CONSTRUCTORS.items() if v["nac"] == nac]
-        if len(teams) >= 1:
-            cats.append({
-                "key":   f"nac:{nac}",
-                "label": f"{flag} {nac.capitalize()}",
-                "check": lambda t, _n=nac: RAW_CONSTRUCTORS[t]["nac"] == _n,
-                "teams": teams,
-            })
-
-    # 2. Época
-    EPOCAS = {
-        1950: "Años 50s", 1960: "Años 60s", 1970: "Años 70s",
-        1980: "Años 80s", 1990: "Años 90s", 2000: "Años 2000s",
-        2010: "Años 2010s", 2020: "Años 2020s",
-    }
-    for dec, lbl in EPOCAS.items():
-        teams = [t for t, v in RAW_CONSTRUCTORS.items() if dec in v["epocas"]]
-        if len(teams) >= 1:
-            cats.append({
-                "key":   f"epoca:{dec}",
-                "label": f"🗓️ {lbl}",
-                "check": lambda t, _d=dec: _d in RAW_CONSTRUCTORS[t]["epocas"],
-                "teams": teams,
-            })
-
-    # 3. Motor
-    all_motors = set(m for v in RAW_CONSTRUCTORS.values() for m in v["motores"])
-    for motor in sorted(all_motors):
-        teams = [t for t, v in RAW_CONSTRUCTORS.items() if motor in v["motores"]]
-        if len(teams) >= 2:
-            flag = MOTOR_FLAGS.get(motor, "⚙️")
-            cats.append({
-                "key":   f"motor:{motor}",
-                "label": f"{flag} Motor {motor.capitalize()}",
-                "check": lambda t, _m=motor: _m in RAW_CONSTRUCTORS[t]["motores"],
-                "teams": teams,
-            })
-
-    # 4. Logros
-    cats.append({
-        "key": "logro:campeon", "label": "👑 Ganó Campeonato",
-        "check": lambda t: RAW_CONSTRUCTORS[t]["titles"] >= 1,
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["titles"] >= 1],
-    })
-    cats.append({
-        "key": "logro:5titles", "label": "👑👑 ≥5 Campeonatos",
-        "check": lambda t: RAW_CONSTRUCTORS[t]["titles"] >= 5,
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["titles"] >= 5],
-    })
-    cats.append({
-        "key": "logro:wins1", "label": "🏆 Al menos 1 victoria",
-        "check": lambda t: RAW_CONSTRUCTORS[t]["wins"] >= 1,
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["wins"] >= 1],
-    })
-    cats.append({
-        "key": "logro:wins10", "label": "🏆🏆 ≥10 victorias",
-        "check": lambda t: RAW_CONSTRUCTORS[t]["wins"] >= 10,
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["wins"] >= 10],
-    })
-    cats.append({
-        "key": "logro:wins50", "label": "🏆🏆🏆 ≥50 victorias",
-        "check": lambda t: RAW_CONSTRUCTORS[t]["wins"] >= 50,
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["wins"] >= 50],
-    })
-    cats.append({
-        "key": "logro:monaco", "label": "🎰 Ganó en Mónaco",
-        "check": lambda t: "monaco" in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if "monaco" in v["circuitos_victoria"]],
-    })
-    cats.append({
-        "key": "logro:monza", "label": "🇮🇹 Ganó en Monza",
-        "check": lambda t: "monza" in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if "monza" in v["circuitos_victoria"]],
-    })
-    cats.append({
-        "key": "logro:silverstone", "label": "🇬🇧 Ganó en Silverstone",
-        "check": lambda t: "silverstone" in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if "silverstone" in v["circuitos_victoria"]],
-    })
-    cats.append({
-        "key": "logro:spa", "label": "🇧🇪 Ganó en Spa",
-        "check": lambda t: "spa" in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if "spa" in v["circuitos_victoria"]],
-    })
-    cats.append({
-        "key": "logro:suzuka", "label": "🇯🇵 Ganó en Suzuka",
-        "check": lambda t: "suzuka" in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if "suzuka" in v["circuitos_victoria"]],
-    })
-    cats.append({
-        "key": "logro:campeon_piloto", "label": "🌟 Tuvo piloto campeón",
-        "check": lambda t: len(RAW_CONSTRUCTORS[t]["pilotos_campeon"]) >= 1,
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if len(v["pilotos_campeon"]) >= 1],
-    })
-    cats.append({
-        "key": "logro:nocampeon", "label": "❌ Nunca ganó campeonato",
-        "check": lambda t: RAW_CONSTRUCTORS[t]["titles"] == 0,
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["titles"] == 0],
-    })
-    cats.append({
-        "key": "logro:novictoria", "label": "❌ Nunca ganó una carrera",
-        "check": lambda t: RAW_CONSTRUCTORS[t]["wins"] == 0,
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["wins"] == 0],
-    })
-
-    # 5. Circuitos adicionales
-    CIRC_EXTRA = [
-        ("interlagos",   "🇧🇷 Ganó en Interlagos"),
-        ("barcelona",    "🇪🇸 Ganó en Barcelona"),
-        ("nurburgring",  "🇩🇪 Ganó en Nürburgring"),
-        ("hungaroring",  "🇭🇺 Ganó en Hungaroring"),
-        ("melbourne",    "🇦🇺 Ganó en Melbourne"),
-        ("abu dhabi",    "🇦🇪 Ganó en Abu Dhabi"),
-        ("montreal",     "🇨🇦 Ganó en Montreal"),
-        ("zandvoort",    "🇳🇱 Ganó en Zandvoort"),
-    ]
-    for circ, lbl in CIRC_EXTRA:
-        teams = [t for t, v in RAW_CONSTRUCTORS.items() if circ in v["circuitos_victoria"]]
-        if len(teams) >= 2:
-            cats.append({
-                "key":   f"logro:{circ}",
-                "label": lbl,
-                "check": lambda t, _c=circ: _c in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
-                "teams": teams,
-            })
-
-    # 6. Pilotos campeones múltiples
-    cats.append({
-        "key": "logro:2campeon_pilotos", "label": "🌟🌟 ≥2 pilotos campeones",
-        "check": lambda t: len(RAW_CONSTRUCTORS[t]["pilotos_campeon"]) >= 2,
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if len(v["pilotos_campeon"]) >= 2],
-    })
-
-    # 7. Nunca ganó pero corrió ≥5 temporadas
-    cats.append({
-        "key": "logro:never_won_veteran", "label": "🏁 Sin victorias con historia",
-        "check": lambda t: RAW_CONSTRUCTORS[t]["wins"] == 0 and sum(1 for d in RAW_CONSTRUCTORS[t]["epocas"]) >= 2,
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items()
-                  if v["wins"] == 0 and len(v["epocas"]) >= 2],
-    })
-
-    # 8. Usó motor propio (nombre del equipo == motor)
-    MOTORES_PROPIOS = ["ferrari", "honda", "renault", "alfa romeo", "mercedes", "maserati", "bmw"]
-    cats.append({
-        "key": "logro:motor_propio", "label": "⚙️ Usó motor propio",
-        "check": lambda t: any(m == t.split()[0] for m in RAW_CONSTRUCTORS[t]["motores"]),
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items()
-                  if any(m == t.split()[0] for m in v["motores"])],
-    })
-
-    # 9. Equipo que ganó su primera temporada
-    cats.append({
-        "key": "logro:one_season_win", "label": "⚡ Ganó en su primera época",
-        "check": lambda t: (RAW_CONSTRUCTORS[t]["wins"] >= 1
-                            and len(RAW_CONSTRUCTORS[t]["epocas"]) == 1),
-        "teams": [t for t, v in RAW_CONSTRUCTORS.items()
-                  if v["wins"] >= 1 and len(v["epocas"]) == 1],
-    })
-
-    return cats
-
-CONSTRUCTOR_CATS = _build_constructor_categories()
-ALL_CONSTRUCTORS = sorted(RAW_CONSTRUCTORS.keys())
-
-
-# ══════════════════════════════════════════════════════════════════
-#  MODO 2 — PODIUM CHALLENGE: Adivina el top 10
-# ══════════════════════════════════════════════════════════════════
-
 RAW_CONSTRUCTORS = {
     "ferrari": {
         "nac": "italiana", "epocas": [1950,1960,1970,1980,1990,2000,2010,2020],
@@ -3666,7 +4620,644 @@ class PodiumGame:
 # ══════════════════════════════════════════════════════════════════
 #  MODO 4 — CONSTRUCTOR CHALLENGE: Adivina la escudería
 # ══════════════════════════════════════════════════════════════════
+class ConstructorGame:
+    GRID_SIZE = 3
+    COLORS = {
+        "col":    "#1565c0",  # azul para columnas
+        "row":    "#b71c1c",  # rojo para filas
+        "cell_empty":   "#1a1a1a",
+        "cell_correct": "#0a2a0a",
+        "cell_wrong":   "#2a0a0a",
+        "border": "#333",
+        "gold":   "#ffd700",
+        "green":  "#00c853",
+        "red":    "#e10600",
+        "gray":   "#888",
+    }
 
+    def __init__(self):
+        self._score       = 0
+        self._attempts    = {}   # (r,c) -> intentos restantes
+        self._solved      = {}   # (r,c) -> True/False
+        self._grid_cats   = []   # [[col_cats], [row_cats]]
+        self._answers     = {}   # (r,c) -> set of valid teams
+        self._sel         = {}   # widgets dropdown por celda
+        self._cell_out    = {}   # widgets Output por celda
+        self._build_ui()
+
+    # ─── Generación de grilla ────────────────────────────────────
+    def _pick_categories(self):
+        """Elige 3 cols y 3 filas garantizando al menos 1 respuesta por celda."""
+        import random
+        for attempt in range(500):
+            cols = random.sample(CONSTRUCTOR_CATS, self.GRID_SIZE)
+            rows = random.sample([c for c in CONSTRUCTOR_CATS if c not in cols], self.GRID_SIZE)
+            valid = True
+            answers = {}
+            for r, rcat in enumerate(rows):
+                for c, ccat in enumerate(cols):
+                    sol = [t for t in ALL_CONSTRUCTORS
+                           if ccat["check"](t) and rcat["check"](t)]
+                    if len(sol) == 0:
+                        valid = False
+                        break
+                    answers[(r, c)] = set(sol)
+                if not valid:
+                    break
+            if valid:
+                return cols, rows, answers
+        return None, None, None
+
+    # ─── UI ──────────────────────────────────────────────────────
+    def _build_ui(self):
+        C = self.COLORS
+
+        self.header_html  = widgets.HTML("")
+        self.msg_html     = widgets.HTML("")
+
+        # Botón nueva partida
+        self.btn_new = widgets.Button(
+            description="🔄 Nueva Grilla",
+            layout=widgets.Layout(width="160px", height="36px"),
+            style={"button_color": "#1a3a6a", "font_weight": "bold"},
+        )
+        self.btn_new.on_click(lambda _: self._new_game())
+
+        self.grid_out = widgets.Output()
+
+        self.main = widgets.VBox(
+            [self.header_html,
+             widgets.HBox([self.btn_new],
+                          layout=widgets.Layout(justify_content="center", margin="6px 0")),
+             self.msg_html,
+             self.grid_out],
+            layout=widgets.Layout(max_width="760px", margin="0 auto"),
+        )
+        display(self.main)
+        self._new_game()
+
+    def _refresh_header(self):
+        solved  = sum(1 for v in self._solved.values() if v)
+        total   = self.GRID_SIZE * self.GRID_SIZE
+        pct     = int(solved / total * 100)
+        C       = self.COLORS
+        self.header_html.value = (
+            f"<div style='font-family:monospace;text-align:center;padding:8px 0'>"
+            f"<span style='font-size:22px;font-weight:bold;color:{C['red']}'>🏗️ CONSTRUCTOR CHALLENGE</span>"
+            f"<br><span style='font-size:11px;color:{C['gray']}'>"
+            f"Encontrá la escudería que cumple AMBAS condiciones</span>"
+            f"<br><div style='margin-top:6px'>"
+            f"<span style='color:{C['gold']};font-size:14px'>✅ Resueltas: <b>{solved}/{total}</b></span>"
+            f"&nbsp;&nbsp;"
+            f"<span style='color:#aaa;font-size:14px'>⭐ Puntos: <b>{self._score}</b></span>"
+            f"</div></div>"
+        )
+
+    def _new_game(self):
+        self._score    = 0
+        self._solved   = {}
+        self._attempts = {}
+        self._sel      = {}
+        self._cell_out = {}
+
+        cols, rows, answers = self._pick_categories()
+        if cols is None:
+            self.msg_html.value = "<div style='color:red'>Error generando grilla. Intentá de nuevo.</div>"
+            return
+
+        self._col_cats  = cols
+        self._row_cats  = rows
+        self._answers   = answers
+
+        for r in range(self.GRID_SIZE):
+            for c in range(self.GRID_SIZE):
+                self._attempts[(r, c)] = 3
+                self._solved[(r, c)]   = False
+
+        self._refresh_header()
+        self.msg_html.value = ""
+        self._render_grid()
+
+    def _render_grid(self):
+        C    = self.COLORS
+        SIZE = self.GRID_SIZE
+
+        with self.grid_out:
+            clear_output(wait=True)
+
+            # Opciones para dropdowns: todos los constructores
+            self._opts = ["— elegir —"] + [t.title() for t in ALL_CONSTRUCTORS]
+            opts = self._opts
+
+            rows_widgets = []
+
+            # ── Fila de encabezados de columna ──
+            header_cells = [widgets.HTML("<div style='width:160px'></div>")]
+            for c, ccat in enumerate(self._col_cats):
+                header_cells.append(widgets.HTML(
+                    f"<div style='width:155px;text-align:center;font-family:monospace;"
+                    f"font-size:12px;font-weight:bold;color:white;"
+                    f"background:{C['col']};border-radius:8px;padding:8px 4px;"
+                    f"margin:2px'>{ccat['label']}</div>"
+                ))
+            rows_widgets.append(widgets.HBox(header_cells,
+                layout=widgets.Layout(gap="4px", align_items="center")))
+
+            # ── Filas de juego ──
+            for r, rcat in enumerate(self._row_cats):
+                row_cells = []
+
+                # Etiqueta de fila
+                row_cells.append(widgets.HTML(
+                    f"<div style='width:155px;text-align:center;font-family:monospace;"
+                    f"font-size:12px;font-weight:bold;color:white;"
+                    f"background:{C['row']};border-radius:8px;padding:8px 4px;"
+                    f"margin:2px'>{rcat['label']}</div>"
+                ))
+
+                for c in range(SIZE):
+                    cell_out = widgets.Output(
+                        layout=widgets.Layout(width="158px", height="130px")
+                    )
+                    self._cell_out[(r, c)] = cell_out
+                    self._render_cell(r, c)
+                    row_cells.append(cell_out)
+
+                rows_widgets.append(widgets.HBox(row_cells,
+                    layout=widgets.Layout(gap="4px", align_items="center")))
+
+            display(widgets.VBox(rows_widgets, layout=widgets.Layout(gap="4px")))
+
+    def _render_cell(self, r, c):
+        C       = self.COLORS
+        solved  = self._solved[(r, c)]
+        tries   = self._attempts[(r, c)]
+
+        with self._cell_out[(r, c)]:
+            clear_output(wait=True)
+
+            if solved:
+                # Mostrar respuesta correcta
+                team   = self._sel.get((r, c), "?")
+                bg_ok  = C["cell_correct"]
+                gr_ok  = C["green"]
+                gr_dim = "#555"
+                display(widgets.HTML(
+                    f"<div style='background:{bg_ok};border:2px solid {gr_ok};"
+                    f"border-radius:10px;width:150px;height:122px;"
+                    f"display:flex;flex-direction:column;align-items:center;"
+                    f"justify-content:center;font-family:monospace'>"
+                    f"<div style='font-size:22px'>✅</div>"
+                    f"<div style='font-size:12px;font-weight:bold;color:{gr_ok};"
+                    f"text-align:center;padding:4px'>{team.title()}</div>"
+                    f"<div style='font-size:10px;color:{gr_dim}'>{tries} intento(s) usados</div>"
+                    f"</div>"
+                ))
+                return
+
+            if tries == 0:
+                # Agotado — mostrar solución
+                sols   = ", ".join(t.title() for t in sorted(self._answers[(r, c)])[:3])
+                bg_bad = C["cell_wrong"]
+                rd     = C["red"]
+                display(widgets.HTML(
+                    f"<div style='background:{bg_bad};border:2px solid {rd};"
+                    f"border-radius:10px;width:150px;height:122px;"
+                    f"display:flex;flex-direction:column;align-items:center;"
+                    f"justify-content:center;font-family:monospace;padding:4px'>"
+                    f"<div style='font-size:18px'>❌</div>"
+                    f"<div style='font-size:9px;color:{rd};text-align:center'>"
+                    f"Podía ser:<br>{sols}</div>"
+                    f"</div>"
+                ))
+                return
+
+            # ── Dropdown + botón confirmar ──
+            dd = widgets.Dropdown(
+                options=self._opts,
+                value="— elegir —",
+                layout=widgets.Layout(width="150px"),
+            )
+            # Guardar referencia al último dropdown seleccionado
+            self._sel[(r, c)] = "— elegir —"
+
+            def on_dd_change(change, _r=r, _c=c):
+                self._sel[(_r, _c)] = change["new"]
+            dd.observe(on_dd_change, names="value")
+
+            btn = widgets.Button(
+                description="✔ Confirmar",
+                layout=widgets.Layout(width="150px", height="28px"),
+                style={"button_color": "#1a3a6a", "font_weight": "bold"},
+            )
+
+            gray     = C["gray"]
+            dots_ok  = "🟡" * tries
+            dots_bad = "⚫" * (3 - tries)
+            tries_html = widgets.HTML(
+                f"<div style='font-size:10px;color:{gray};font-family:monospace;"
+                f"text-align:center'>{dots_ok}{dots_bad} {tries} int.</div>"
+            )
+
+            btn.on_click(lambda _, _r=r, _c=c: self._submit((_r, _c)))
+
+            display(widgets.VBox(
+                [dd, btn, tries_html],
+                layout=widgets.Layout(
+                    background=C["cell_empty"],
+                    border=f"2px solid {C['border']}",
+                    border_radius="10px",
+                    padding="6px",
+                    width="150px",
+                    align_items="center",
+                    gap="4px",
+                )
+            ))
+
+    def _submit(self, key):
+        r, c    = key
+        chosen  = self._sel.get(key, "— elegir —")
+        if chosen == "— elegir —":
+            return
+
+        chosen_norm = chosen.lower().strip()
+        correct     = chosen_norm in self._answers[key]
+
+        if correct:
+            self._solved[key] = True
+            pts = 30 * self._attempts[key]   # más puntos por menos intentos
+            self._score += pts
+            self._refresh_header()
+
+            # Guardar nombre usado
+            self._sel[key] = chosen_norm
+            self._render_cell(r, c)
+
+            # Mensaje si ganó todo
+            if all(self._solved.values()):
+                self.msg_html.value = (
+                    f"<div style='text-align:center;font-family:monospace;"
+                    f"font-size:18px;color:#ffd700;padding:10px'>"
+                    f"🏆 ¡GRILLA COMPLETA! Puntuación final: {self._score} pts</div>"
+                )
+        else:
+            self._attempts[key] -= 1
+            self._render_cell(r, c)
+            if self._attempts[key] == 0:
+                rd2 = self.COLORS["red"]
+                self.msg_html.value = (
+                    f"<div style='text-align:center;font-family:monospace;"
+                    f"font-size:13px;color:{rd2};padding:4px'>"
+                    f"❌ Sin intentos en esa celda</div>"
+                )
+
+# ══════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════
+#  MODO 3 — DUELO DE PILOTOS: ¿Quién tiene más?
+# ══════════════════════════════════════════════════════════════════
+class DuelGame:
+    STATS = ["wins", "podiums", "champion"]
+    STAT_LABELS = {
+        "wins":     ("🏆 VICTORIAS",   "victorias"),
+        "podiums":  ("🥇 PODIOS",      "podios"),
+        "champion": ("👑 CAMPEONATOS", "campeonatos"),
+    }
+    COLORS = {
+        "bg":    "#0d0d0d", "card":  "#1a1a1a", "border": "#333333",
+        "red":   "#e10600", "gold":  "#ffd700", "green":  "#00c853",
+        "gray":  "#888888", "white": "#f0f0f0",
+    }
+
+    def __init__(self):
+        self.f1 = SERIES_F1
+        self._build_driver_pool()
+        self._streak = 0
+        self._best   = 0
+        self._total  = 0
+        self._state  = "playing"
+        self._current_stat = "wins"
+        self._driver_a = self._driver_b = None
+        self._val_a    = self._val_b    = None
+        self._build_ui()
+
+    def _build_driver_pool(self):
+        self.pool_star = [
+            d for d, m in self.f1.drivers_meta.items()
+            if m["podiums"] >= 1
+        ]
+        self.pool_all = list(self.f1.drivers_meta.keys())
+
+    def _get_stat_value(self, driver, stat):
+        m = self.f1.drivers_meta[driver]
+        if stat == "wins":    return m["wins"]
+        if stat == "podiums": return m["podiums"]
+        if stat == "champion":
+            c = m["champion"]
+            if isinstance(c, bool): return 1 if c else 0
+            if isinstance(c, int):  return c
+            return 0
+        return 0
+
+    def _pick_pair(self, stat):
+        import random
+        pool = self.pool_star if len(self.pool_star) >= 10 else self.pool_all
+        for _ in range(300):
+            a, b = random.sample(pool, 2)
+            va, vb = self._get_stat_value(a, stat), self._get_stat_value(b, stat)
+            if va == vb:
+                continue
+            # Para victorias: evitar duelos contra alguien con 0
+            if stat == "wins" and min(va, vb) == 0 and max(va, vb) > 15:
+                continue
+            return a, b, va, vb
+        # Fallback sin filtro
+        a, b = random.sample(pool, 2)
+        while self._get_stat_value(a, stat) == self._get_stat_value(b, stat):
+            b = random.choice(pool)
+        return a, b, self._get_stat_value(a, stat), self._get_stat_value(b, stat)
+
+    def _fmt_name(self, d):
+        return d.title()
+
+    def _fmt_flag(self, d):
+        FLAGS = {
+            "española":"🇪🇸","británica":"🇬🇧","alemana":"🇩🇪","finlandesa":"🇫🇮",
+            "australiana":"🇦🇺","brasileña":"🇧🇷","mexicana":"🇲🇽","francesa":"🇫🇷",
+            "monegasca":"🇲🇨","neerlandesa":"🇳🇱","tailandesa":"🇹🇭","argentina":"🇦🇷",
+            "canadiense":"🇨🇦","rusa":"🇷🇺","italiana":"🇮🇹","japonesa":"🇯🇵",
+            "austriaca":"🇦🇹","colombiana":"🇨🇴","venezolana":"🇻🇪","polaca":"🇵🇱",
+            "danesa":"🇩🇰","neozelandesa":"🇳🇿","sueca":"🇸🇪","sudafricana":"🇿🇦",
+            "estadounidense":"🇺🇸","suiza":"🇨🇭","india":"🇮🇳","portuguesa":"🇵🇹",
+            "húngara":"🇭🇺","belga":"🇧🇪","irlandesa":"🇮🇪","china":"🇨🇳",
+            "noruega":"🇳🇴","estonia":"🇪🇪","singapurense":"🇸🇬","turca":"🇹🇷",
+        }
+        nat = self.f1.drivers_meta[d]["nationality"]
+        return FLAGS.get(nat, "🏁")
+
+    def _card_html(self, driver, revealed=False, val=None, winner=False, loser=False):
+        C       = self.COLORS
+        name    = self._fmt_name(driver)
+        flag    = self._fmt_flag(driver)
+        nat     = self.f1.drivers_meta[driver]["nationality"].capitalize()
+        teams   = self.f1.drivers_meta[driver]["teams"]
+        team_str = ", ".join(t.title() for t in teams[:2])
+        if len(teams) > 2: team_str += " ..."
+
+        border = C["green"] if winner else (C["red"] if loser else C["border"])
+        bg     = "#0a2a0a"  if winner else ("#2a0a0a" if loser else C["card"])
+
+        if revealed and val is not None:
+            stat_word = self.STAT_LABELS[self._current_stat][1]
+            num_color = C["gold"] if winner else (C["gray"] if loser else C["white"])
+            stat_html = (
+                f"<div style='font-size:40px;font-weight:bold;color:{num_color};"
+                f"margin:10px 0 2px 0'>{val}</div>"
+                f"<div style='font-size:10px;color:{C['gray']};text-transform:uppercase;"
+                f"letter-spacing:2px'>{stat_word}</div>"
+            )
+        else:
+            stat_html = (
+                f"<div style='font-size:40px;font-weight:bold;color:{C['gray']};"
+                f"margin:10px 0 2px 0'>?</div>"
+                f"<div style='font-size:10px;color:{C['gray']};text-transform:uppercase;"
+                f"letter-spacing:2px'>{self.STAT_LABELS[self._current_stat][1]}</div>"
+            )
+
+        return (
+            f"<div style='background:{bg};border:2px solid {border};border-radius:12px;"
+            f"padding:22px 18px;text-align:center;min-width:190px;max-width:230px'>"
+            f"<div style='font-size:34px'>{flag}</div>"
+            f"<div style='font-size:17px;font-weight:bold;color:{C['white']};"
+            f"margin:6px 0 2px 0;font-family:monospace'>{name}</div>"
+            f"<div style='font-size:10px;color:{C['gray']};margin-bottom:6px'>{nat}</div>"
+            f"<div style='font-size:9px;color:#555;margin-bottom:10px'>{team_str}</div>"
+            f"{stat_html}"
+            f"</div>"
+        )
+
+    def _refresh_header(self):
+        C = self.COLORS
+        self.header_html.value = (
+            f"<div style='font-family:monospace;text-align:center;padding:8px 0'>"
+            f"<span style='font-size:22px;font-weight:bold;color:{C['red']}'>⚔️ DUELO DE PILOTOS</span>"
+            f"<br><span style='font-size:11px;color:{C['gray']}'>F1 · Racha infinita · Victorias / Podios / Campeonatos</span>"
+            f"<br><div style='margin-top:8px'>"
+            f"<span style='color:{C['gold']};font-size:14px'>🔥 Racha: <b>{self._streak}</b></span>"
+            f"&nbsp;&nbsp;&nbsp;"
+            f"<span style='color:{C['gray']};font-size:14px'>🏅 Mejor: <b>{self._best}</b></span>"
+            f"&nbsp;&nbsp;&nbsp;"
+            f"<span style='color:#aaa;font-size:14px'>⭐ Pts: <b>{self._total}</b></span>"
+            f"</div></div>"
+        )
+
+    def _build_ui(self):
+        import random
+        C = self.COLORS
+
+        self.header_html   = widgets.HTML("")
+        self.question_html = widgets.HTML("")
+        self.card_a        = widgets.HTML("")
+        self.card_b        = widgets.HTML("")
+        self.feedback_html = widgets.HTML("")
+        self._refresh_header()
+
+        # Botones de elección
+        self.btn_a = widgets.Button(
+            description="◀  IZQUIERDA",
+            layout=widgets.Layout(width="175px", height="44px"),
+            style={"button_color": "#1e3a5f", "font_weight": "bold"},
+        )
+        self.btn_b = widgets.Button(
+            description="DERECHA  ▶",
+            layout=widgets.Layout(width="175px", height="44px"),
+            style={"button_color": "#1e3a5f", "font_weight": "bold"},
+        )
+        self.btn_next = widgets.Button(
+            description="➡ SIGUIENTE",
+            layout=widgets.Layout(width="155px", height="40px", display="none"),
+            style={"button_color": "#004d00", "font_weight": "bold"},
+        )
+        self.btn_restart = widgets.Button(
+            description="🔄 NUEVA PARTIDA",
+            layout=widgets.Layout(width="175px", height="40px", display="none"),
+            style={"button_color": "#4a0000", "font_weight": "bold"},
+        )
+
+        self.btn_a.on_click(lambda _: self._answer("a"))
+        self.btn_b.on_click(lambda _: self._answer("b"))
+        self.btn_next.on_click(lambda _: self._next_round())
+        self.btn_restart.on_click(lambda _: self._restart())
+
+        self.btn_daily = widgets.ToggleButton(
+            value=False, description="📅 Duelo del Día",
+            layout=widgets.Layout(width="155px", height="40px"),
+            button_style="",
+        )
+        self.btn_daily.observe(self._on_daily_toggle, names="value")
+
+        vs_label = widgets.HTML(
+            "<div style='width:36px;text-align:center;font-size:20px;"
+            "color:#444;padding-top:56px'>VS</div>"
+        )
+        cards_row  = widgets.HBox(
+            [self.card_a, vs_label, self.card_b],
+            layout=widgets.Layout(justify_content="center", align_items="flex-start", gap="6px"),
+        )
+        btns_row   = widgets.HBox(
+            [self.btn_a, self.btn_b],
+            layout=widgets.Layout(justify_content="center", gap="18px", margin="10px 0 4px 0"),
+        )
+        action_row = widgets.HBox(
+            [self.btn_daily, self.btn_next, self.btn_restart],
+            layout=widgets.Layout(justify_content="center", gap="12px"),
+        )
+
+        self.main = widgets.VBox(
+            [self.header_html, self.question_html, cards_row,
+             btns_row, self.feedback_html, action_row],
+            layout=widgets.Layout(max_width="560px", margin="0 auto"),
+        )
+        display(self.main)
+        self._next_round()
+
+    def _on_daily_toggle(self, change):
+        self.btn_daily.description  = "📅 Duelo ON" if change["new"] else "📅 Duelo del Día"
+        self.btn_daily.button_style = "warning"     if change["new"] else ""
+        self._restart()
+
+    def _daily_seed_duel(self):
+        import hashlib, datetime
+        today  = datetime.date.today().isoformat()
+        return int(hashlib.md5(f"duel-{today}".encode()).hexdigest(), 16) % (2**31)
+
+    def _already_played_duel(self):
+        import datetime, json, pathlib
+        today = datetime.date.today().isoformat()
+        key   = f"duel-daily-{today}"
+        try:
+            data = json.loads(pathlib.Path("~/.f1grid_data.json").expanduser().read_text())
+            return data.get("daily_played", {}).get(key, False)
+        except Exception:
+            return False
+
+    def _mark_duel_played(self):
+        import datetime, json, pathlib
+        today = datetime.date.today().isoformat()
+        key   = f"duel-daily-{today}"
+        p     = pathlib.Path("~/.f1grid_data.json").expanduser()
+        try:
+            data = json.loads(p.read_text()) if p.exists() else {}
+        except Exception:
+            data = {}
+        data.setdefault("daily_played", {})[key] = True
+        p.write_text(json.dumps(data))
+
+    def _next_round(self):
+        import random
+        if getattr(self, 'btn_daily', None) and self.btn_daily.value:
+            # Modo diario: secuencia fija por fecha basada en ronda actual
+            rng = random.Random(self._daily_seed_duel() + self._streak)
+            stats_order = [self.STATS[rng.randint(0, len(self.STATS)-1)]]
+            self._current_stat = stats_order[0]
+            pool = sorted(self.pool_star)
+            for _ in range(300):
+                a, b = rng.sample(pool, 2)
+                va, vb = self._get_stat_value(a, self._current_stat), self._get_stat_value(b, self._current_stat)
+                if va != vb:
+                    break
+        else:
+            self._current_stat = random.choice(self.STATS)
+            a, b, va, vb       = self._pick_pair(self._current_stat)
+
+        self._driver_a, self._driver_b = a, b
+        self._val_a,    self._val_b    = va, vb
+        self._state = "playing"
+
+        stat_word = self.STAT_LABELS[self._current_stat][1]
+        self.question_html.value = (
+            f"<div style='font-family:monospace;text-align:center;padding:8px 0 12px 0'>"
+            f"<span style='font-size:14px;color:#bbb'>¿Quién tiene más </span>"
+            f"<span style='font-size:15px;font-weight:bold;color:#ffd700'>{stat_word.upper()}</span>"
+            f"<span style='font-size:14px;color:#bbb'> en F1?</span>"
+            f"</div>"
+        )
+
+        self.card_a.value      = self._card_html(a)
+        self.card_b.value      = self._card_html(b)
+        self.feedback_html.value = ""
+
+        self.btn_a.disabled              = False
+        self.btn_b.disabled              = False
+        self.btn_a.layout.display        = ""
+        self.btn_b.layout.display        = ""
+        self.btn_next.layout.display     = "none"
+        self.btn_restart.layout.display  = "none"
+
+    def _answer(self, chosen):
+        if self._state != "playing":
+            return
+        self._state = "revealed"
+        self.btn_a.disabled = True
+        self.btn_b.disabled = True
+
+        a, b   = self._driver_a, self._driver_b
+        va, vb = self._val_a,    self._val_b
+        correct_side = "a" if va > vb else "b"
+        correct      = chosen == correct_side
+
+        # Revelar cartas
+        self.card_a.value = self._card_html(a, revealed=True, val=va,
+                                             winner=(va>vb), loser=(va<vb))
+        self.card_b.value = self._card_html(b, revealed=True, val=vb,
+                                             winner=(vb>va), loser=(vb<va))
+
+        if correct:
+            self._streak += 1
+            if self._streak > self._best:
+                self._best = self._streak
+            pts = 10 + (self._streak - 1) * 5
+            self._total += pts
+            self._refresh_header()
+            self.feedback_html.value = (
+                f"<div style='text-align:center;font-family:monospace;padding:8px'>"
+                f"<span style='font-size:20px;color:#00c853;font-weight:bold'>"
+                f"✅ ¡CORRECTO!  +{pts} pts</span>"
+                f"<span style='font-size:12px;color:#666;display:block;margin-top:2px'>"
+                f"Racha actual: {self._streak}</span>"
+                f"</div>"
+            )
+            self.btn_next.layout.display    = ""
+            self.btn_restart.layout.display = ""
+        else:
+            self._streak = 0
+            self._refresh_header()
+            if getattr(self, 'btn_daily', None) and self.btn_daily.value:
+                self._mark_duel_played()
+            winner_name = self._fmt_name(a if va > vb else b)
+            self.feedback_html.value = (
+                f"<div style='text-align:center;font-family:monospace;padding:8px'>"
+                f"<span style='font-size:20px;color:#e10600;font-weight:bold'>"
+                f"❌ INCORRECTO — Racha perdida</span>"
+                f"<span style='font-size:12px;color:#888;display:block;margin-top:2px'>"
+                f"Ganaba {winner_name}</span>"
+                f"</div>"
+            )
+            self.btn_restart.layout.display = ""
+            self.btn_next.layout.display    = ""
+
+    def _restart(self):
+        self._streak = 0
+        self._refresh_header()
+        self._next_round()
+
+
+
+
+# ══════════════════════════════════════════════════════════════════
+#  BASE DE DATOS — EVENTOS HISTÓRICOS F1
+#  Cada evento: (año, descripción, categoría)
+#  Categorías: "debut", "titulo", "accidente", "reglamento"
+# ══════════════════════════════════════════════════════════════════
 F1_EVENTS = [
     # ── Debuts de pilotos ────────────────────────────────────────
     (1950, "Debut de Juan Manuel Fangio en F1",                         "debut"),
@@ -3826,3 +5417,2421 @@ F1_EVENTS = F1_EVENTS_CLEAN
 # ══════════════════════════════════════════════════════════════════
 #  MODO 5 — LÍNEA DE TIEMPO: Ordená los eventos
 # ══════════════════════════════════════════════════════════════════
+class TimelineGame:
+    CAT_COLORS = {
+        "debut":      ("#1565c0", "🏎️", "Debut"),
+        "titulo":     ("#b71c1c", "👑", "Título"),
+        "accidente":  ("#4a148c", "🚨", "Accidente"),
+        "reglamento": ("#1b5e20", "📋", "Reglamento"),
+        "victoria":   ("#e65100", "🏆", "Victoria"),
+        "record":     ("#880e4f", "⭐", "Récord"),
+    }
+    N = 5  # eventos por ronda
+
+    # Dificultad: (label, descripción, rango de años permitido, multiplicador pts)
+    DIFFS = {
+        "🟢 Fácil":   ("Eventos de décadas muy distintas",  None,        1),
+        "🟡 Medio":   ("Eventos de un rango de ~30 años",   30,          2),
+        "🔴 Difícil": ("Eventos de un rango de ~15 años",   15,          3),
+    }
+
+    def __init__(self):
+        self._score            = 0
+        self._ronda            = 0        # ronda global (histórico)
+        self._ronda_partida    = 0        # ronda dentro de la partida actual (1-10)
+        self._diff             = "🟢 Fácil"
+        self._events           = []
+        self._build_ui()
+
+    RONDAS_POR_PARTIDA = 10
+
+    # ─── UI principal ────────────────────────────────────────────
+    def _build_ui(self):
+        self.header_html   = widgets.HTML("")
+        self.msg_html      = widgets.HTML("")
+        self.list_box      = widgets.VBox([])
+
+        # Selector de dificultad
+        self.diff_toggle = widgets.ToggleButtons(
+            options=list(self.DIFFS.keys()),
+            value="🟢 Fácil",
+            button_style="",
+            style={"button_width": "130px", "font_weight": "bold"},
+        )
+        self.diff_toggle.observe(self._on_diff_change, names="value")
+
+        # Botón para arrancar después de elegir dificultad
+        self.btn_iniciar = widgets.Button(
+            description="▶ INICIAR",
+            layout=widgets.Layout(width="160px", height="42px"),
+            style={"button_color": "#b71c1c", "font_weight": "bold"},
+        )
+        self.btn_iniciar.on_click(lambda _: self._iniciar())
+
+        self.btn_confirmar = widgets.Button(
+            description="✔ CONFIRMAR ORDEN",
+            layout=widgets.Layout(width="220px", height="42px", display="none"),
+            style={"button_color": "#1a3a6a", "font_weight": "bold"},
+        )
+        self.btn_siguiente = widgets.Button(
+            description="➡ SIGUIENTE RONDA",
+            layout=widgets.Layout(width="220px", height="42px", display="none"),
+            style={"button_color": "#004d00", "font_weight": "bold"},
+        )
+        self.btn_confirmar.on_click(lambda _: self._confirmar())
+        self.btn_siguiente.on_click(lambda _: self._nueva_ronda())
+
+        self.btn_jugar_de_nuevo = widgets.Button(
+            description="🔄 JUGAR DE NUEVO",
+            layout=widgets.Layout(width="200px", height="42px", display="none"),
+            style={"button_color": "#b71c1c", "font_weight": "bold"},
+        )
+        self.btn_jugar_de_nuevo.on_click(lambda _: self._pedir_dificultad())
+
+        self.main = widgets.VBox(
+            [self.header_html,
+             widgets.HBox([self.diff_toggle],
+                          layout=widgets.Layout(justify_content="center", margin="4px 0")),
+             widgets.HBox([self.btn_iniciar, self.btn_confirmar,
+                           self.btn_siguiente, self.btn_jugar_de_nuevo],
+                          layout=widgets.Layout(justify_content="center",
+                                                gap="12px", margin="6px 0")),
+             self.msg_html,
+             self.list_box],
+            layout=widgets.Layout(max_width="700px", margin="0 auto"),
+        )
+        display(self.main)
+        self._pedir_dificultad()
+
+    def _pedir_dificultad(self):
+        """Muestra la pantalla inicial de selección de dificultad y resetea la partida."""
+        self._score         = 0
+        self._ronda_partida = 0
+        self.diff_toggle.disabled         = False
+        self.btn_iniciar.layout.display   = ""
+        self.btn_confirmar.layout.display = "none"
+        self.btn_siguiente.layout.display = "none"
+        self.btn_jugar_de_nuevo.layout.display = "none"
+        self.msg_html.value    = ""
+        self.list_box.children = []
+        self._refresh_header()
+
+    def _iniciar(self):
+        """El jugador confirmó la dificultad — arrancar la partida desde ronda 1."""
+        self._score         = 0
+        self._ronda_partida = 0
+        self._diff          = self.diff_toggle.value
+        self.btn_iniciar.layout.display   = "none"
+        self.btn_confirmar.layout.display = ""
+        self._nueva_ronda()
+
+    def _on_diff_change(self, change):
+        self._diff = change["new"]
+        self._refresh_header()
+
+    def _refresh_header(self):
+        _, desc, mult = self.DIFFS[self._diff]
+        mult_str = f"×{mult}" if mult > 1 else "×1"
+        progreso = f"Ronda <b>{self._ronda_partida}/{self.RONDAS_POR_PARTIDA}</b>" if self._ronda_partida > 0 else "Elegí la dificultad"
+        self.header_html.value = (
+            f"<div style='font-family:monospace;text-align:center;padding:8px 0'>"
+            f"<span style='font-size:22px;font-weight:bold;color:#e10600'>"
+            f"📅 LÍNEA DE TIEMPO</span>"
+            f"<br><span style='font-size:11px;color:#888'>"
+            f"Ordená los eventos de más antiguo a más reciente · {desc}</span>"
+            f"<br><div style='margin-top:6px'>"
+            f"<span style='color:#ffd700;font-size:14px'>{progreso}</span>"
+            f"&nbsp;&nbsp;"
+            f"<span style='color:#aaa;font-size:14px'>Mult: <b>{mult_str}</b></span>"
+            f"&nbsp;&nbsp;"
+            f"<span style='color:#aaa;font-size:14px'>⭐ Puntos: <b>{self._score}</b></span>"
+            f"</div></div>"
+        )
+
+    # ─── Lógica de ronda ─────────────────────────────────────────
+    def _nueva_ronda(self):
+        import random
+        self._ronda         += 1
+        self._ronda_partida += 1
+        self._refresh_header()
+        self.msg_html.value = ""
+        self.btn_siguiente.layout.display = "none"
+        self.btn_confirmar.layout.display = ""
+        self.btn_confirmar.disabled       = False
+        self.diff_toggle.disabled         = True  # bloqueado durante la partida
+
+        _, max_range, _ = self.DIFFS[self._diff]
+        pool = F1_EVENTS[:]
+
+        if max_range is None:
+            # Fácil: elegir de décadas distintas
+            random.shuffle(pool)
+            chosen = []
+            used_decades = set()
+            used_years   = set()
+            for ev in pool:
+                decade = (ev[0] // 10) * 10
+                if decade not in used_decades and ev[0] not in used_years:
+                    chosen.append(ev)
+                    used_decades.add(decade)
+                    used_years.add(ev[0])
+                if len(chosen) == self.N:
+                    break
+        else:
+            # Medio/Difícil: elegir un año ancla y tomar eventos cercanos
+            all_years = sorted(set(e[0] for e in pool))
+            for _ in range(200):
+                anchor = random.choice(all_years)
+                window = [e for e in pool
+                          if abs(e[0] - anchor) <= max_range]
+                years_in_window = sorted(set(e[0] for e in window))
+                if len(years_in_window) >= self.N:
+                    break
+            # Tomar N eventos con años distintos de la ventana
+            random.shuffle(window)
+            chosen     = []
+            used_years = set()
+            for ev in window:
+                if ev[0] not in used_years:
+                    chosen.append(ev)
+                    used_years.add(ev[0])
+                if len(chosen) == self.N:
+                    break
+            # Si no alcanza, completar con cualquier evento
+            if len(chosen) < self.N:
+                remaining = [e for e in pool if e[0] not in used_years]
+                random.shuffle(remaining)
+                for ev in remaining:
+                    if ev[0] not in used_years:
+                        chosen.append(ev)
+                        used_years.add(ev[0])
+                    if len(chosen) == self.N:
+                        break
+
+        random.shuffle(chosen)
+        self._events        = list(chosen)
+        self._correct_order = sorted(chosen, key=lambda e: e[0])
+        self._render_list()
+
+    def _render_list(self):
+        rows = []
+        for i, (yr, desc, cat) in enumerate(self._events):
+            color, icon, label = self.CAT_COLORS[cat]
+            badge = (
+                f"<span style='background:{color};color:white;border-radius:4px;"
+                f"padding:2px 6px;font-size:10px;font-family:monospace'>"
+                f"{icon} {label}</span>"
+            )
+            desc_html = widgets.HTML(
+                f"<div style='font-family:monospace;font-size:12px;"
+                f"color:#ddd;padding:4px 8px;flex:1'>"
+                f"{badge} &nbsp;{desc}</div>"
+            )
+            btn_up = widgets.Button(
+                description="▲",
+                layout=widgets.Layout(width="36px", height="36px"),
+                style={"button_color": "#1a3a1a"},
+                disabled=(i == 0),
+            )
+            btn_dn = widgets.Button(
+                description="▼",
+                layout=widgets.Layout(width="36px", height="36px"),
+                style={"button_color": "#3a1a1a"},
+                disabled=(i == len(self._events) - 1),
+            )
+            btn_up.on_click(lambda _, idx=i: self._move(idx, -1))
+            btn_dn.on_click(lambda _, idx=i: self._move(idx, +1))
+
+            pos_html = widgets.HTML(
+                f"<div style='font-family:monospace;font-size:14px;"
+                f"color:#555;width:22px;text-align:center'>{i+1}</div>"
+            )
+
+            row = widgets.HBox(
+                [pos_html, btn_up, btn_dn, desc_html],
+                layout=widgets.Layout(
+                    background="#1a1a1a",
+                    border="1px solid #333",
+                    border_radius="8px",
+                    margin="3px 0",
+                    align_items="center",
+                    padding="4px",
+                )
+            )
+            rows.append(row)
+        self.list_box.children = rows
+
+    def _move(self, idx, delta):
+        lst = self._events
+        new_idx = idx + delta
+        if 0 <= new_idx < len(lst):
+            lst[idx], lst[new_idx] = lst[new_idx], lst[idx]
+            self._events = lst
+            self._render_list()
+
+    # ─── Confirmar y puntuar ─────────────────────────────────────
+    def _confirmar(self):
+        self.btn_confirmar.disabled = True
+        correct = self._correct_order
+        player  = self._events
+
+        # Calcular posiciones correctas
+        hits = sum(1 for i in range(self.N) if player[i][1] == correct[i][1])
+        _, _, mult = self.DIFFS[self._diff]
+        # Puntos: 20 pts por posición correcta × multiplicador, bonus si perfecto
+        pts = hits * 20 * mult
+        if hits == self.N:
+            pts += 50 * mult
+
+        self._score += pts
+        self.diff_toggle.disabled = True   # no cambiar dificultad a mitad de ronda revelada
+        self._refresh_header()
+
+        # Mostrar resultado con años revelados
+        rows = []
+        for i, (yr, desc, cat) in enumerate(correct):
+            color, icon, label = self.CAT_COLORS[cat]
+            player_pos = next(j for j, e in enumerate(player) if e[1] == desc)
+            ok = (player_pos == i)
+            bg    = "#0a2a0a" if ok else "#2a0a0a"
+            mark  = "✅" if ok else "❌"
+            badge = (
+                f"<span style='background:{color};color:white;border-radius:4px;"
+                f"padding:2px 5px;font-size:10px'>{icon} {label}</span>"
+            )
+            row = widgets.HTML(
+                f"<div style='background:{bg};border:1px solid #333;"
+                f"border-radius:8px;padding:6px 10px;margin:3px 0;"
+                f"font-family:monospace;font-size:12px;color:#ddd'>"
+                f"{mark} <b style='color:#ffd700'>{yr}</b> &nbsp;"
+                f"{badge} &nbsp;{desc}</div>"
+            )
+            rows.append(row)
+
+        self.list_box.children = rows
+
+        # Mensaje de resultado
+        if hits == self.N:
+            msg_color, msg_txt = "#ffd700", f"🏆 ¡PERFECTO! +{pts} pts"
+        elif hits >= 3:
+            msg_color, msg_txt = "#00c853", f"✅ ¡Muy bien! {hits}/{self.N} correctos — +{pts} pts"
+        elif hits >= 1:
+            msg_color, msg_txt = "#ff9800", f"⚠️ {hits}/{self.N} correctos — +{pts} pts"
+        else:
+            msg_color, msg_txt = "#e10600", f"❌ 0 correctos — +0 pts"
+
+        self.msg_html.value = (
+            f"<div style='text-align:center;font-family:monospace;"
+            f"font-size:16px;color:{msg_color};padding:8px;font-weight:bold'>"
+            f"{msg_txt}</div>"
+            f"<div style='text-align:center;font-size:11px;color:#555;"
+            f"font-family:monospace'>Orden correcto arriba ↑</div>"
+        )
+        self.btn_confirmar.layout.display = "none"
+        # ¿Fin de partida?
+        if self._ronda_partida >= self.RONDAS_POR_PARTIDA:
+            self._fin_partida()
+        else:
+            self.btn_siguiente.layout.display = ""
+
+    def _fin_partida(self):
+        """Muestra la pantalla de fin de partida con puntuación final."""
+        _, _, mult = self.DIFFS[self._diff]
+        max_posible = self.RONDAS_POR_PARTIDA * (self.N * 20 + 50) * mult
+        pct = int(self._score / max_posible * 100) if max_posible > 0 else 0
+
+        if pct >= 90:   trofeo, color = "🏆 CAMPEÓN MUNDIAL",   "#ffd700"
+        elif pct >= 70: trofeo, color = "🥇 Gran actuación",     "#00c853"
+        elif pct >= 50: trofeo, color = "🥈 Buen intento",       "#ff9800"
+        elif pct >= 30: trofeo, color = "🥉 Seguí practicando",  "#e65100"
+        else:           trofeo, color = "💀 A estudiar más F1",  "#e10600"
+
+        self.list_box.children = []
+        self.msg_html.value = (
+            f"<div style='font-family:monospace;text-align:center;padding:16px;background:#111;"
+            f"border:2px solid #333;border-radius:12px;margin-top:8px'>"
+            f"<div style='font-size:28px;font-weight:bold;color:{color}'>{trofeo}</div>"
+            f"<div style='font-size:14px;color:#aaa;margin-top:8px'>"
+            f"Dificultad: <b style='color:#fff'>{self._diff}</b></div>"
+            f"<div style='font-size:32px;font-weight:bold;color:#ffd700;margin:12px 0'>"
+            f"⭐ {self._score} puntos</div>"
+            f"<div style='font-size:12px;color:#555'>"
+            f"Máximo posible: {max_posible} pts &nbsp;|&nbsp; Logrado: {pct}%</div>"
+            f"</div>"
+        )
+        self.btn_siguiente.layout.display      = "none"
+        self.btn_jugar_de_nuevo.layout.display = ""
+
+
+# ══════════════════════════════════════════════════════════════════
+#  MODO 6 — ¿QUIÉN SOY? PILOTO MISTERIOSO
+#  Pistas progresivas. Menos pistas usadas = más puntos.
+# ══════════════════════════════════════════════════════════════════
+class MysteryDriverGame:
+    # (descripción de la pista, campo a mostrar, puntos si acertás con ESTA pista)
+    PISTAS_DEF = [
+        ("época",        "epoca",       500),
+        ("nacionalidad", "nac",         400),
+        ("equipos",      "equipos",     300),
+        ("estadísticas", "stats",       200),
+        ("campeonatos",  "campeonatos", 100),
+    ]
+
+    def __init__(self):
+        self._score         = 0
+        self._pistas_vistas = 0
+        self._respondido    = False
+        self._vistos        = set()   # pilotos ya mostrados en esta sesión
+        self._todos_pilotos = sorted(n.title() for n in RAW_F1.keys())
+        self._build_ui()
+
+    # ── Construcción de UI ───────────────────────────────────────
+    def _build_ui(self):
+        self.header_html = widgets.HTML("")
+        self.pistas_box  = widgets.VBox([])
+        self.msg_html    = widgets.HTML("")
+
+        # Combobox con autocompletado
+        self.input_combo = widgets.Combobox(
+            placeholder="Escribí el nombre o apellido...",
+            options=self._todos_pilotos,
+            ensure_option=False,
+            layout=widgets.Layout(width="320px", height="36px"),
+        )
+        self.input_combo.on_submit(lambda w: self._responder(w.value))
+
+        # Live feedback: verde si el nombre/apellido coincide con alguien de la BD
+        def _live_check(change):
+            val = normalize(change['new'].strip().lower())
+            if not val:
+                self.input_combo.layout.border = ""
+                return
+            # Verificar si coincide con algún piloto (nombre completo o apellido)
+            match = any(
+                val == normalize(n.lower()) or
+                val == normalize(n.lower().split()[-1]) or
+                (len(val) >= 4 and val in normalize(n.lower()))
+                for n in RAW_F1
+            )
+            self.input_combo.layout.border = (
+                "2px solid #00c853" if match else "2px solid #f9a825"
+            )
+        self.input_combo.observe(_live_check, names='value')
+
+        self.btn_responder = widgets.Button(
+            description="✔ RESPONDER",
+            layout=widgets.Layout(width="150px", height="36px"),
+            style={"button_color": "#1a3a6a", "font_weight": "bold"},
+        )
+        self.btn_pista = widgets.Button(
+            description="💡 VER PISTA",
+            layout=widgets.Layout(width="140px", height="36px"),
+            style={"button_color": "#4a3000", "font_weight": "bold"},
+        )
+        self.btn_siguiente = widgets.Button(
+            description="➡ SIGUIENTE",
+            layout=widgets.Layout(width="140px", height="36px", display="none"),
+            style={"button_color": "#004d00", "font_weight": "bold"},
+        )
+
+        self.btn_responder.on_click(lambda _: self._responder(self.input_combo.value))
+        self.btn_pista.on_click(lambda _: self._ver_pista())
+        self.btn_siguiente.on_click(lambda _: self._nueva_ronda())
+
+        self.btn_daily = widgets.ToggleButton(
+            value=False, description="📅 Diario",
+            layout=widgets.Layout(width="110px", height="36px"),
+            button_style="",
+        )
+        self.btn_daily.observe(self._on_daily_toggle, names="value")
+
+        self.main = widgets.VBox([
+            self.header_html,
+            self.pistas_box,
+            self.msg_html,
+            widgets.HBox(
+                [self.btn_daily, self.input_combo, self.btn_responder,
+                 self.btn_pista, self.btn_siguiente],
+                layout=widgets.Layout(justify_content="center",
+                                      gap="8px", margin="8px 0",
+                                      flex_wrap="wrap"),
+            ),
+        ], layout=widgets.Layout(max_width="700px", margin="0 auto"))
+
+        display(self.main)
+        self._nueva_ronda()
+
+    # ── Header ───────────────────────────────────────────────────
+    def _refresh_header(self):
+        idx      = min(self._pistas_vistas, len(self.PISTAS_DEF)) - 1
+        pts_now  = self.PISTAS_DEF[idx][2] if idx >= 0 else 500
+        total    = len([n for n,d in RAW_F1.items() if d[2]>0 or d[3]>0 or bool(d[4])])
+        vistos   = len(self._vistos)
+        self.header_html.value = (
+            f"<div style='font-family:monospace;text-align:center;padding:8px 0'>"
+            f"<span style='font-size:22px;font-weight:bold;color:#e10600'>🕵️ ¿QUIÉN SOY?</span>"
+            f"<br><span style='font-size:11px;color:#888'>"
+            f"Adiviná el piloto con la menor cantidad de pistas posibles</span>"
+            f"<br><div style='margin-top:6px'>"
+            f"<span style='color:#aaa;font-size:14px'>⭐ Puntos: <b>{self._score}</b></span>"
+            f"&nbsp;&nbsp;"
+            f"<span style='color:#00c853;font-size:13px'>Si acertás ahora: <b>+{pts_now}</b></span>"
+            f"&nbsp;&nbsp;"
+            f"<span style='color:#555;font-size:11px'>Vistos: {vistos}/{total}</span>"
+            f"</div></div>"
+        )
+
+    def _on_daily_toggle(self, change):
+        self.btn_daily.description  = "📅 Diario ON" if change["new"] else "📅 Diario"
+        self.btn_daily.button_style = "warning"      if change["new"] else ""
+        self._nueva_ronda()
+
+    def _daily_seed_mystery(self):
+        import hashlib, datetime
+        today  = datetime.date.today().isoformat()
+        digest = int(hashlib.md5(f"mystery-{today}".encode()).hexdigest(), 16)
+        return digest % (2**31)
+
+    def _already_played_mystery(self):
+        import datetime, json, pathlib
+        today = datetime.date.today().isoformat()
+        key   = f"mystery-daily-{today}"
+        try:
+            data = json.loads(pathlib.Path("~/.f1grid_data.json").expanduser().read_text())
+            return data.get("daily_played", {}).get(key, False)
+        except Exception:
+            return False
+
+    def _mark_mystery_played(self):
+        import datetime, json, pathlib
+        today = datetime.date.today().isoformat()
+        key   = f"mystery-daily-{today}"
+        p     = pathlib.Path("~/.f1grid_data.json").expanduser()
+        try:
+            data = json.loads(p.read_text()) if p.exists() else {}
+        except Exception:
+            data = {}
+        data.setdefault("daily_played", {})[key] = True
+        p.write_text(json.dumps(data))
+
+    # ── Lógica de ronda ──────────────────────────────────────────
+    def _nueva_ronda(self):
+        import random
+        self._pistas_vistas = 0
+        self._respondido    = False
+
+        candidatos = [(n, d) for n, d in RAW_F1.items()
+                      if (d[2] > 0 or d[3] > 0 or bool(d[4])) and n not in self._vistos]
+        if not candidatos:
+            self._vistos = set()
+            candidatos = [(n, d) for n, d in RAW_F1.items()
+                          if d[2] > 0 or d[3] > 0 or bool(d[4])]
+
+        if self.btn_daily.value:
+            # Modo diario: mismo piloto para todos hoy
+            rng = random.Random(self._daily_seed_mystery())
+            todos = sorted([(n, d) for n, d in RAW_F1.items()
+                            if d[2] > 0 or d[3] > 0 or bool(d[4])], key=lambda x: x[0])
+            self._piloto_nombre, self._piloto_data = rng.choice(todos)
+            if self._already_played_mystery():
+                self.msg_html.value = (
+                    "<div style='text-align:center;font-family:monospace;"
+                    "font-size:14px;color:#ff9800;padding:8px'>"
+                    "📅 Ya jugaste el piloto del día. ¡Volvé mañana!</div>"
+                )
+                self.btn_responder.disabled = True
+                self.btn_pista.disabled     = True
+        else:
+            self._piloto_nombre, self._piloto_data = random.choice(candidatos)
+        self._vistos.add(self._piloto_nombre)
+
+        self.input_combo.value              = ""
+        self.input_combo.disabled           = False
+        self.btn_responder.disabled         = False
+        self.btn_pista.disabled             = False
+        self.btn_siguiente.layout.display   = "none"
+        self.msg_html.value                 = ""
+
+        self._refresh_header()
+        self._render_pistas()
+        self._mostrar_pista()   # primera pista siempre gratis
+
+    # ── Pistas ───────────────────────────────────────────────────
+    def _pista_texto(self, idx):
+        label, desc, pts = self.PISTAS_DEF[idx]
+        d = self._piloto_data
+        equipos, nac, wins, podios, champ, debut, academy, birth, seasons, last = d
+
+        if desc == "epoca":
+            decada = (debut // 10) * 10
+            txt = f"Debutó en la <b>década del {decada}</b>"
+        elif desc == "nac":
+            txt = f"Nacionalidad: <b>{nac.capitalize()}</b>"
+        elif desc == "equipos":
+            eq = equipos
+            if len(eq) == 1:
+                txt = f"Corrió solo para <b>{eq[0].title()}</b>"
+            elif len(eq) == 2:
+                txt = f"Corrió para <b>{eq[0].title()}</b> y <b>{eq[1].title()}</b>"
+            else:
+                txt = (f"Primer equipo: <b>{eq[0].title()}</b>"
+                       f" &nbsp;·&nbsp; Último: <b>{eq[-1].title()}</b>")
+        elif desc == "stats":
+            txt = f"Victorias: <b>{wins}</b> &nbsp;·&nbsp; Podios: <b>{podios}</b>"
+        elif desc == "campeonatos":
+            c      = int(bool(champ)) if isinstance(champ, bool) else champ
+            activo = "activo" if last == 0 else f"retirado en {last}"
+            txt    = (f"Campeonatos: <b>{c}</b> &nbsp;·&nbsp;"
+                      f" Temporadas: <b>{seasons}</b> &nbsp;·&nbsp; {activo}")
+        else:
+            txt = "?"
+        return label.capitalize(), txt, pts
+
+    def _render_pistas(self):
+        rows = []
+        for i in range(self._pistas_vistas):
+            label, txt, pts = self._pista_texto(i)
+            rows.append(widgets.HTML(
+                f"<div style='background:#1a1a1a;border:1px solid #333;"
+                f"border-radius:8px;padding:8px 14px;margin:3px 0;"
+                f"font-family:monospace;font-size:13px;color:#ddd'>"
+                f"<span style='color:#888;font-size:10px'>PISTA {i+1} · {label} · "
+                f"<span style='color:#ffd700'>{pts} pts si acertás</span></span>"
+                f"<br>{txt}</div>"
+            ))
+        self.pistas_box.children = rows
+
+    def _mostrar_pista(self):
+        if self._pistas_vistas < len(self.PISTAS_DEF):
+            self._pistas_vistas += 1
+            self._render_pistas()
+            self._refresh_header()
+            if self._pistas_vistas >= len(self.PISTAS_DEF):
+                self.btn_pista.disabled = True
+
+    def _ver_pista(self):
+        if not self._respondido:
+            self._mostrar_pista()
+
+    # ── Respuesta ────────────────────────────────────────────────
+    def _responder(self, valor):
+        if self._respondido:
+            return
+        valor = normalize(valor.strip().lower())
+        if not valor:
+            return
+
+        self._respondido            = True
+        self.input_combo.disabled   = True
+        self.btn_responder.disabled = True
+        self.btn_pista.disabled     = True
+
+        correcto      = normalize(self._piloto_nombre.lower())
+        partes        = correcto.split()          # ["ayrton", "senna"]
+        apellido      = partes[-1]                # "senna"
+        primer_nombre = partes[0] if partes else correcto
+
+        # Coincidencia flexible:
+        # 1. Nombre completo exacto
+        # 2. Solo apellido (última palabra)
+        # 3. Solo primer nombre (si es corto y único)
+        # 4. El valor ingresado está contenido en el nombre completo (substring)
+        # 5. El nombre completo está contenido en el valor (por si escriben más)
+        acierto = (
+            valor == correcto
+            or valor == apellido
+            or (len(primer_nombre) >= 4 and valor == primer_nombre)
+            or (len(valor) >= 4 and valor in correcto)
+            or correcto in valor
+        )
+
+        if acierto:
+            pts = self.PISTAS_DEF[self._pistas_vistas - 1][2]
+            self._score += pts
+            color = "#ffd700" if pts >= 400 else "#00c853"
+            emoji = "🏆" if pts == 500 else "✅"
+            msg   = f"{emoji} ¡CORRECTO! &nbsp;<b>+{pts} pts</b>"
+        else:
+            pts   = 0
+            color = "#e10600"
+            msg   = (f"❌ Incorrecto — era "
+                     f"<b style='color:#ffd700'>{self._piloto_nombre.title()}</b>")
+
+        # Revelar todas las pistas restantes
+        self._pistas_vistas = len(self.PISTAS_DEF)
+        self._render_pistas()
+        self._refresh_header()
+
+        self.msg_html.value = (
+            f"<div style='text-align:center;font-family:monospace;"
+            f"font-size:16px;color:{color};padding:8px;font-weight:bold'>{msg}</div>"
+        )
+        if self.btn_daily.value:
+            self._mark_mystery_played()
+            self.btn_siguiente.layout.display = "none"
+        else:
+            self.btn_siguiente.layout.display = ""
+
+
+# ══════════════════════════════════════════════════════════════════
+#  GRAFO DE COMPAÑEROS DE EQUIPO — basado en años reales
+#  Dos pilotos son compañeros si coincidieron en el mismo equipo
+#  el mismo año (o rango de años solapado).
+# ══════════════════════════════════════════════════════════════════
+
+# Tabla de piloto → [(equipo, año_inicio, año_fin), ...]
+_DRIVER_YEARS = {
+    "max verstappen":       [("toro rosso",2015,2015),("red bull",2016,2026)],
+    "charles leclerc":      [("sauber",2018,2018),("ferrari",2019,2026)],
+    "lewis hamilton":       [("mclaren",2007,2012),("mercedes",2013,2024),("ferrari",2025,2026)],
+    "george russell":       [("williams",2019,2021),("mercedes",2022,2026)],
+    "lando norris":         [("mclaren",2019,2026)],
+    "oscar piastri":        [("mclaren",2023,2026)],
+    "carlos sainz":         [("toro rosso",2015,2017),("renault",2018,2018),("mclaren",2019,2020),("ferrari",2021,2024),("williams",2025,2026)],
+    "fernando alonso":      [("minardi",2001,2001),("renault",2003,2006),("mclaren",2007,2007),("renault",2008,2009),("ferrari",2010,2014),("mclaren",2015,2017),("alpine",2021,2022),("aston martin",2023,2026)],
+    "lance stroll":         [("williams",2017,2018),("racing point",2019,2020),("aston martin",2021,2026)],
+    "nico hulkenberg":      [("williams",2010,2010),("force india",2011,2012),("sauber",2013,2013),("force india",2014,2016),("renault",2017,2019),("racing point",2020,2020),("haas",2023,2026)],
+    "pierre gasly":         [("toro rosso",2017,2017),("red bull",2019,2019),("toro rosso",2019,2019),("alphatauri",2020,2022),("alpine",2023,2026)],
+    "esteban ocon":         [("manor",2016,2016),("force india",2017,2018),("renault",2019,2019),("alpine",2020,2023),("haas",2024,2026)],
+    "valtteri bottas":      [("williams",2013,2016),("mercedes",2017,2021),("alfa romeo",2022,2023),("sauber",2024,2024),("cadillac",2026,2026)],
+    "yuki tsunoda":         [("alphatauri",2021,2023),("racing bulls",2024,2025),("red bull",2025,2026)],
+    "liam lawson":          [("alphatauri",2023,2023),("racing bulls",2024,2024),("red bull",2025,2026)],
+    "alexander albon":      [("toro rosso",2019,2019),("red bull",2019,2020),("williams",2022,2026)],
+    "oliver bearman":       [("ferrari",2024,2024),("haas",2025,2026)],
+    "kimi antonelli":       [("mercedes",2025,2026)],
+    "isack hadjar":         [("racing bulls",2025,2026)],
+    "gabriel bortoleto":    [("sauber",2025,2026)],
+    "jack doohan":          [("alpine",2025,2025)],
+    "franco colapinto":     [("williams",2024,2024),("alpine",2025,2026)],
+    "sebastian vettel":     [("bmw sauber",2007,2007),("toro rosso",2007,2009),("red bull",2009,2014),("ferrari",2015,2020),("aston martin",2021,2022)],
+    "kimi raikkonen":       [("sauber",2001,2001),("mclaren",2002,2006),("ferrari",2007,2009),("lotus",2012,2013),("ferrari",2014,2018),("alfa romeo",2019,2021)],
+    "jenson button":        [("williams",2000,2000),("benetton",2001,2001),("renault",2002,2002),("bar",2003,2005),("honda",2006,2008),("brawn gp",2009,2009),("mclaren",2010,2016)],
+    "nico rosberg":         [("williams",2006,2009),("mercedes",2010,2016)],
+    "daniel ricciardo":     [("hrt",2011,2011),("toro rosso",2012,2013),("red bull",2014,2018),("renault",2019,2020),("mclaren",2021,2022),("alphatauri",2023,2023),("racing bulls",2024,2024)],
+    "sergio perez":         [("sauber",2011,2011),("mclaren",2013,2013),("force india",2014,2018),("racing point",2019,2020),("red bull",2021,2024),("cadillac",2026,2026)],
+    "felipe massa":         [("sauber",2002,2002),("ferrari",2006,2013),("williams",2014,2017)],
+    "romain grosjean":      [("renault",2009,2009),("lotus",2012,2015),("haas",2016,2020)],
+    "stoffel vandoorne":    [("mclaren",2017,2018)],
+    "daniil kvyat":         [("toro rosso",2014,2014),("red bull",2015,2016),("toro rosso",2016,2017),("toro rosso",2019,2020)],
+    "kevin magnussen":      [("mclaren",2014,2014),("renault",2016,2016),("haas",2017,2020),("haas",2022,2024)],
+    "marcus ericsson":      [("caterham",2014,2014),("sauber",2015,2018)],
+    "pastor maldonado":     [("williams",2011,2013),("lotus",2014,2015)],
+    "paul di resta":        [("force india",2011,2013)],
+    "heikki kovalainen":    [("renault",2007,2007),("mclaren",2008,2009),("lotus",2010,2011),("caterham",2012,2013)],
+    "jarno trulli":         [("minardi",1997,1997),("prost",1997,1999),("jordan",2000,2001),("renault",2002,2004),("toyota",2004,2009),("lotus",2010,2011)],
+    "giancarlo fisichella": [("minardi",1996,1996),("jordan",1997,1997),("benetton",1998,2001),("jordan",2002,2002),("sauber",2003,2004),("renault",2004,2007),("force india",2008,2009),("ferrari",2009,2009)],
+    "robert kubica":        [("bmw sauber",2006,2009),("lotus",2010,2010),("williams",2019,2019)],
+    "nick heidfeld":        [("prost",2000,2000),("sauber",2001,2003),("jordan",2004,2004),("williams",2005,2005),("bmw sauber",2006,2009),("mercedes",2010,2010),("renault",2011,2011)],
+    "rubens barrichello":   [("jordan",1993,1996),("stewart",1997,1999),("ferrari",2000,2005),("honda",2006,2008),("brawn gp",2009,2009),("williams",2010,2011)],
+    "michael schumacher":   [("jordan",1991,1991),("benetton",1991,1995),("ferrari",1996,2006),("mercedes",2010,2012)],
+    "mika hakkinen":        [("lotus",1991,1992),("mclaren",1993,2001)],
+    "david coulthard":      [("williams",1994,1995),("mclaren",1996,2004),("red bull",2005,2008)],
+    "eddie irvine":         [("jordan",1993,1995),("ferrari",1996,1999),("jaguar",2000,2002)],
+    "heinz-harold frentzen":[("sauber",1994,1996),("williams",1997,1998),("jordan",1999,2001),("prost",2001,2001),("arrows",2002,2002)],
+    "ralf schumacher":      [("jordan",1997,1998),("williams",1999,2004),("toyota",2005,2007)],
+    "damon hill":           [("williams",1993,1996),("arrows",1997,1997),("jordan",1998,1999)],
+    "nigel mansell":        [("lotus",1980,1984),("williams",1985,1988),("ferrari",1989,1990),("williams",1991,1992),("williams",1994,1994),("mclaren",1995,1995)],
+    "ayrton senna":         [("toleman",1984,1984),("lotus",1985,1987),("mclaren",1988,1992),("williams",1994,1994)],
+    "alain prost":          [("mclaren",1980,1980),("renault",1981,1983),("mclaren",1984,1989),("ferrari",1990,1991),("williams",1993,1993)],
+    "nelson piquet":        [("ensign",1978,1978),("brabham",1978,1985),("williams",1986,1987),("lotus",1988,1989),("benetton",1990,1991)],
+    "gerhard berger":       [("ats",1984,1984),("arrows",1985,1985),("benetton",1986,1986),("ferrari",1987,1989),("mclaren",1990,1992),("ferrari",1993,1995),("benetton",1996,1997)],
+    "niki lauda":           [("march",1971,1972),("brm",1973,1973),("ferrari",1974,1977),("brabham",1978,1979),("mclaren",1982,1985)],
+    "carlos reutemann":     [("brabham",1972,1976),("ferrari",1977,1978),("lotus",1979,1979),("williams",1980,1982)],
+    "jody scheckter":       [("mclaren",1972,1972),("tyrrell",1974,1976),("wolf",1977,1978),("ferrari",1979,1980)],
+    "james hunt":           [("hesketh",1973,1975),("mclaren",1976,1978),("wolf",1979,1979)],
+    "mario andretti":       [("lotus",1976,1979),("alfa romeo",1981,1982)],
+    "gilles villeneuve":    [("mclaren",1977,1977),("ferrari",1977,1982)],
+    "emerson fittipaldi":   [("lotus",1970,1973),("mclaren",1974,1975),("fittipaldi",1976,1980)],
+    "jackie stewart":       [("brm",1965,1967),("matra",1968,1969),("march",1970,1970),("tyrrell",1970,1973)],
+    "clay regazzoni":       [("ferrari",1970,1972),("ferrari",1974,1976),("ensign",1977,1977),("shadow",1977,1977),("williams",1979,1979),("ensign",1980,1980)],
+    "ronnie peterson":      [("march",1970,1972),("lotus",1973,1974),("march",1976,1976),("tyrrell",1977,1977),("lotus",1978,1978)],
+    "jochen rindt":         [("cooper",1965,1967),("brabham",1968,1968),("lotus",1969,1970)],
+    "jim clark":            [("lotus",1960,1968)],
+    "juan manuel fangio":   [("alfa romeo",1950,1951),("maserati",1953,1953),("mercedes",1954,1955),("ferrari",1956,1956),("maserati",1957,1958)],
+    "jack brabham":         [("cooper",1955,1960),("brabham",1962,1970)],
+    "stirling moss":        [("maserati",1954,1956),("mercedes",1955,1955),("vanwall",1957,1958),("cooper",1959,1961),("lotus",1960,1962)],
+    "john surtees":         [("lotus",1960,1960),("cooper",1960,1961),("ferrari",1963,1966),("honda",1967,1967),("surtees",1970,1972)],
+    "graham hill":          [("lotus",1958,1959),("brm",1960,1966),("lotus",1967,1970),("brabham",1971,1972),("shadow",1973,1973)],
+    "bruce mclaren":        [("cooper",1959,1965),("mclaren",1966,1970)],
+    "denny hulme":          [("brabham",1965,1967),("mclaren",1968,1974)],
+    "john watson":          [("brabham",1974,1975),("penske",1976,1977),("brabham",1977,1977),("mclaren",1979,1983)],
+    "alan jones":           [("williams",1977,1981),("arrows",1983,1983)],
+    "keke rosberg":         [("wolf",1978,1978),("fittipaldi",1979,1980),("williams",1982,1985),("mclaren",1986,1986)],
+    "michele alboreto":     [("tyrrell",1981,1983),("ferrari",1984,1988),("tyrrell",1989,1989),("arrows",1990,1991)],
+    "stefan johansson":     [("tyrrell",1983,1983),("toleman",1984,1984),("ferrari",1985,1986),("mclaren",1987,1988),("ligier",1988,1988)],
+    "derek warwick":        [("toleman",1983,1984),("renault",1984,1985),("brabham",1986,1986),("arrows",1987,1988),("lotus",1990,1990)],
+    "nelson piquet jr":     [("renault",2008,2009)],
+    "mark webber":          [("minardi",2002,2002),("jaguar",2003,2004),("williams",2005,2006),("red bull",2007,2013)],
+    "timo glock":           [("jordan",2004,2004),("toyota",2008,2009),("marussia",2010,2013)],
+    "kamui kobayashi":      [("toyota",2009,2009),("sauber",2010,2012),("caterham",2014,2014)],
+    "jean alesi":           [("tyrrell",1989,1990),("ferrari",1991,1995),("benetton",1996,1996),("sauber",1997,1998),("arrows",1999,1999),("prost",2000,2001),("jordan",2001,2001)],
+    "olivier panis":        [("ligier",1994,1996),("prost",1997,1999),("bar",2001,2003),("toyota",2003,2004)],
+    "mika salo":            [("lotus",1994,1994),("tyrrell",1995,1997),("arrows",1998,1998),("ferrari",1999,1999),("sauber",2000,2000),("toyota",2002,2002)],
+    "johnny herbert":       [("benetton",1989,1989),("lotus",1990,1992),("lotus",1994,1994),("benetton",1994,1995),("sauber",1996,1998),("stewart",1999,1999),("jaguar",2000,2000)],
+    "jj lehto":             [("onyx",1989,1989),("dallara",1991,1991),("sauber",1991,1993),("benetton",1994,1994)],
+    "eddie cheever":        [("tyrrell",1978,1978),("ligier",1979,1979),("renault",1980,1982),("alfa romeo",1984,1985),("arrows",1986,1989)],
+    "thierry boutsen":      [("arrows",1983,1985),("benetton",1986,1987),("williams",1989,1990),("ligier",1991,1992),("jordan",1993,1993)],
+    "andrea de cesaris":    [("mclaren",1981,1981),("alfa romeo",1982,1983),("ligier",1984,1984),("minardi",1985,1986),("brabham",1986,1987),("rial",1988,1988),("dallara",1989,1990),("jordan",1991,1991),("tyrrell",1992,1994)],
+    "martin brundle":       [("tyrrell",1984,1984),("zakspeed",1987,1987),("brabham",1989,1989),("williams",1992,1992),("benetton",1992,1993),("mclaren",1994,1994),("ligier",1995,1995),("jordan",1996,1996)],
+    "jos verstappen":       [("benetton",1994,1994),("simtek",1995,1995),("footwork",1996,1996),("tyrrell",1997,1997),("stewart",1998,1998),("arrows",1999,2001),("minardi",2003,2003)],
+    "johnny cecotto":       [("toleman",1983,1984)],
+    "heikki kovalainen":    [("renault",2007,2007),("mclaren",2008,2009),("lotus",2010,2011),("caterham",2012,2013)],
+    "tarso marques":        [("minardi",1996,1997),("minardi",2001,2001)],
+    "luca badoer":          [("footwork",1993,1993),("minardi",1995,1996),("ferrari",1999,2000),("ferrari",2009,2009)],
+    "ivan capelli":         [("tyrrell",1983,1983),("march",1987,1991),("ferrari",1992,1992),("jordan",1993,1993)],
+    "alexander wurz":       [("benetton",1997,1999),("mclaren",2000,2000),("williams",2007,2007)],
+    "rene arnoux":          [("renault",1979,1982),("ferrari",1983,1985),("ligier",1986,1989)],
+    "patrick tambay":       [("mclaren",1978,1979),("ferrari",1982,1983),("renault",1984,1985)],
+    "arturo merzario":      [("ferrari",1972,1973),("williams",1975,1975),("march",1978,1978)],
+    "patrick depailler":    [("tyrrell",1972,1978),("ligier",1979,1979),("alfa romeo",1980,1980)],
+    "didier pironi":        [("tyrrell",1978,1979),("ligier",1980,1980),("ferrari",1981,1982)],
+    "elio de angelis":      [("shadow",1979,1979),("lotus",1980,1985),("brabham",1986,1986)],
+    "riccardo patrese":     [("shadow",1977,1977),("arrows",1978,1981),("brabham",1982,1983),("alfa romeo",1985,1985),("brabham",1986,1987),("williams",1988,1992),("benetton",1993,1993)],
+    "jean-pierre jabouille": [("renault",1977,1980)],
+    "jacques villeneuve":   [("williams",1996,1998),("bar",1999,2003),("renault",2004,2004),("sauber",2005,2005),("bmw sauber",2006,2006)],
+    "bertrand gachot":      [("onyx",1989,1989),("coloni",1990,1990),("jordan",1991,1991),("larrousse",1991,1992),("pacific",1994,1995)],
+    "antonio giovinazzi":   [("sauber",2017,2017),("alfa romeo",2019,2021)],
+    "guanyu zhou":          [("alfa romeo",2022,2023),("sauber",2024,2024)],
+    "nyck de vries":        [("williams",2022,2022),("alphatauri",2023,2023)],
+    "mick schumacher":      [("haas",2021,2022)],
+    "nikita mazepin":       [("haas",2021,2021)],
+    "vitaly petrov":        [("renault",2010,2011),("caterham",2012,2012)],
+    "pedro de la rosa":     [("arrows",1999,2000),("jaguar",2002,2002),("mclaren",2005,2010),("sauber",2010,2010),("hrt",2011,2012),("williams",2012,2012)],
+    "juan pablo montoya":   [("williams",2001,2004),("mclaren",2005,2006)],
+    "scott speed":          [("toro rosso",2006,2007)],
+    "sebastien buemi":      [("toro rosso",2009,2011)],
+    "jaime alguersuari":    [("toro rosso",2009,2011)],
+    "jean-eric vergne":     [("toro rosso",2012,2014)],
+    "sebastien bourdais":   [("toro rosso",2008,2009)],
+    "brendon hartley":      [("toro rosso",2017,2018)],
+    "adrian sutil":         [("spyker",2007,2007),("force india",2008,2011),("force india",2013,2013),("sauber",2014,2014)],
+    "jochen mass":          [("surtees",1973,1974),("mclaren",1974,1977),("arrows",1979,1982)],
+    "chris amon":           [("lotus",1963,1963),("ferrari",1967,1969),("march",1970,1970),("matra",1971,1972),("tyrrell",1973,1973)],
+    "piero taruffi":        [("alfa romeo",1950,1952),("ferrari",1952,1956)],
+    "jacky ickx":           [("ferrari",1968,1969),("brabham",1969,1969),("ferrari",1970,1973),("lotus",1974,1975)],
+    "henri pescarolo":      [("matra",1968,1971),("march",1972,1973),("brabham",1974,1974)],
+    "francois cevert":      [("tyrrell",1970,1973)],
+    "peter revson":         [("mclaren",1972,1973)],
+    "jo siffert":           [("cooper",1963,1967),("lotus",1969,1969),("brm",1971,1971)],
+    "pedro rodriguez":      [("ferrari",1965,1965),("cooper",1966,1968),("brm",1968,1971)],
+    "dan gurney":           [("ferrari",1959,1959),("brm",1960,1960),("porsche",1961,1962),("brabham",1963,1965),("eagle",1966,1968)],
+    "innes ireland":        [("lotus",1959,1962)],
+    "tony brooks":          [("vanwall",1957,1958),("ferrari",1959,1959),("cooper",1960,1960),("brm",1960,1960)],
+    "phill hill":           [("ferrari",1958,1962)],
+    "alberto ascari":       [("ferrari",1950,1953),("lancia",1954,1955)],
+    "giuseppe farina":      [("alfa romeo",1950,1951),("ferrari",1952,1955)],
+    "luigi fagioli":        [("alfa romeo",1950,1951)],
+    "mike hawthorn":        [("ferrari",1953,1955),("ferrari",1957,1958)],
+    "peter collins":        [("ferrari",1956,1958)],
+    "roy salvadori":        [("cooper",1958,1961),("aston martin",1961,1961)],
+    "luigi musso":          [("ferrari",1956,1958)],
+    "wolfgang von trips":   [("ferrari",1956,1961)],
+    "richie ginther":       [("ferrari",1960,1961),("brm",1962,1964),("honda",1965,1966)],
+    "jo bonnier":           [("brm",1959,1960),("porsche",1961,1962),("cooper",1963,1964)],
+    "lorenzo bandini":      [("ferrari",1961,1961),("ferrari",1963,1967)],
+    "bruce mclaren":        [("cooper",1959,1965),("mclaren",1966,1970)],
+    "mike spence":          [("lotus",1963,1968)],
+    "piers courage":        [("williams",1969,1970)],
+    "gunnar nilsson":       [("lotus",1976,1977)],
+    "lella lombardi":       [("march",1975,1975)],
+    "jean-pierre beltoise": [("matra",1967,1971),("brm",1972,1974)],
+    "vittorio brambilla":   [("march",1974,1977)],
+    "bruno giacomelli":     [("alfa romeo",1978,1982)],
+    "jan lammers":          [("shadow",1979,1979)],
+    "philippe alliot":      [("ram",1984,1985),("larrousse",1986,1989)],
+    "aguri suzuki":         [("larrousse",1990,1992),("footwork",1993,1993),("ligier",1994,1994)],
+    "satoru nakajima":      [("lotus",1987,1989),("tyrrell",1991,1991)],
+    "jean-pierre jabouille":[("renault",1977,1980)],
+    "marc surer":           [("ensign",1979,1979),("ats",1980,1981),("arrows",1982,1985),("brabham",1985,1985)],
+    "pierluigi martini":    [("minardi",1985,1992),("minardi",1994,1995)],
+    "ukyo katayama":        [("tyrrell",1992,1995)],
+    "narain karthikeyan":   [("jordan",2005,2005),("hrt",2011,2012)],
+    "takuma sato":          [("bar",2002,2005),("super aguri",2006,2008)],
+    "anthony davidson":     [("bar",2002,2003),("super aguri",2007,2008)],
+    "vitantonio liuzzi":    [("red bull",2005,2005),("toro rosso",2006,2007),("force india",2009,2010),("hrt",2011,2011)],
+    "christijan albers":    [("minardi",2005,2005),("spyker",2007,2007)],
+    "mark webber":          [("minardi",2002,2002),("jaguar",2003,2004),("williams",2005,2006),("red bull",2007,2013)],
+    "christian klien":      [("jaguar",2004,2004),("red bull",2005,2006),("spyker",2007,2007)],
+    "tiago monteiro":       [("jordan",2005,2005)],
+    "robert doornbos":      [("minardi",2005,2005),("red bull",2006,2006)],
+    "marc gene":            [("minardi",1999,1999),("minardi",2000,2001),("williams",2003,2004),("ferrari",2003,2004)],
+    "esteban gutierrez":    [("sauber",2012,2014),("haas",2016,2016)],
+    "bruno senna":          [("hrt",2010,2011),("renault",2011,2011),("williams",2012,2012)],
+    "pascal wehrlein":      [("manor",2016,2016),("sauber",2017,2017)],
+    "nicholas latifi":      [("williams",2020,2022)],
+    "logan sargeant":       [("williams",2023,2024)],
+    "nyck de vries":        [("williams",2022,2022),("alphatauri",2023,2023)],
+    "pierre gasly":         [("toro rosso",2017,2017),("red bull",2019,2019),("toro rosso",2019,2019),("alphatauri",2020,2022),("alpine",2023,2026)],
+    "jack brabham":         [("cooper",1955,1960),("brabham",1962,1970)],
+    "stirling moss":        [("maserati",1954,1956),("mercedes",1955,1955),("vanwall",1957,1958),("cooper",1959,1961),("lotus",1960,1962)],
+    "juan manuel fangio":   [("alfa romeo",1950,1951),("maserati",1953,1953),("mercedes",1954,1955),("ferrari",1956,1956),("maserati",1957,1958)],
+    "jose froilan gonzalez":[("ferrari",1951,1954),("maserati",1955,1957)],
+    "mick schumacher":      [("haas",2021,2022)],
+    "pietro fittipaldi":    [("haas",2020,2020)],
+    "rio haryanto":         [("manor",2016,2016)],
+    "will stevens":         [("caterham",2014,2014),("manor",2015,2015)],
+    "jules bianchi":        [("marussia",2013,2014)],
+    "max chilton":          [("marussia",2013,2014)],
+    "charles pic":          [("marussia",2012,2012),("caterham",2013,2013)],
+    "giedo van der garde":  [("caterham",2013,2013)],
+    "lucas di grassi":      [("virgin",2010,2010)],
+    "roberto merhi":        [("manor",2015,2015)],
+    "jordan king":          [("manor",2016,2016)],
+    "alexander rossi":      [("manor",2015,2015)],
+    "harry schell":         [("maserati",1954,1955),("vanwall",1956,1957),("cooper",1958,1960)],
+    "jose froilan gonzalez":[("ferrari",1951,1954),("maserati",1955,1957)],
+    "hans joachim stuck":   [("march",1974,1974),("brabham",1974,1975),("shadow",1977,1978),("ats",1978,1979),("williams",1983,1985)],
+    "teo fabi":             [("toleman",1982,1982),("brabham",1984,1984),("benetton",1987,1987)],
+    "jean marc gounon":     [("minardi",1993,1993),("simtek",1994,1994)],
+    "denny hulme":          [("brabham",1965,1967),("mclaren",1968,1974)],
+    "jochen mass":          [("surtees",1973,1974),("mclaren",1974,1977),("arrows",1979,1982)],
+    "stefan bellof":        [("tyrrell",1984,1985)],
+    "jonathan palmer":      [("ram",1983,1984),("zakspeed",1987,1987),("tyrrell",1987,1989)],
+    "christian danner":     [("zakspeed",1985,1985),("arrows",1986,1986),("rial",1988,1989)],
+    "yannick dalmas":       [("larrousse",1987,1987),("ags",1988,1989),("coloni",1989,1989)],
+    "emmanuele pirro":      [("benetton",1989,1989),("dallara",1990,1991)],
+    "alex caffi":           [("osella",1986,1988),("dallara",1988,1990),("arrows",1990,1991)],
+    "pedro paulo diniz":    [("forti",1995,1995),("ligier",1996,1996),("arrows",1997,1998),("sauber",1999,2000)],
+    "antonio pizzonia":     [("jaguar",2003,2003),("williams",2003,2004),("bmw sauber",2005,2005)],
+    "enrique bernoldi":     [("arrows",2001,2002)],
+    "erik comas":           [("ligier",1991,1992),("larrousse",1993,1994)],
+    "ralph firman":         [("jordan",2003,2003)],
+    "zsolt baumgartner":    [("jordan",2003,2003),("minardi",2004,2004)],
+    "hector rebaque":       [("lotus",1979,1980),("brabham",1980,1981)],
+    "shinji nakano":        [("prost",1997,1997),("minardi",1998,1998)],
+    "jan magnussen":        [("stewart",1997,1997)],
+    "sakon yamamoto":       [("super aguri",2006,2006),("spyker",2007,2007)],
+    "markus winkelhock":    [("spyker",2007,2007)],
+    "helmut marko":         [("brm",1971,1972)],
+    "howden ganley":        [("brm",1971,1972),("march",1973,1974)],
+    "henri pescarolo":      [("matra",1968,1971),("march",1972,1973),("brabham",1974,1974)],
+    "giancarlo baghetti":   [("ferrari",1961,1962)],
+    "trevor taylor":        [("lotus",1961,1964)],
+    "emilio de villota":    [("williams",1977,1977),("march",1977,1977)],
+    "jean-eric vergne":     [("toro rosso",2012,2014)],
+    "nick de vries":        [("williams",2022,2022),("alphatauri",2023,2023)],
+    "jack fairman":         [("cooper",1958,1961)],
+    "bob anderson":         [("lotus",1963,1963)],
+}
+
+def _build_chain_graph():
+    """Construye el grafo de compañeros REALES usando años solapados."""
+    from collections import defaultdict
+
+    # Para cada equipo y año, lista de pilotos activos ese año en ese equipo
+    # Primero expandimos _DRIVER_YEARS a (piloto, equipo, año) triples
+    entries = []
+    for driver, stints in _DRIVER_YEARS.items():
+        for team, y1, y2 in stints:
+            for yr in range(y1, y2 + 1):
+                entries.append((driver, team, yr))
+
+    # Agrupar por (equipo, año)
+    from collections import defaultdict
+    slot = defaultdict(list)
+    for driver, team, yr in entries:
+        slot[(team, yr)].append(driver)
+
+    # Conectar compañeros reales
+    graph      = defaultdict(set)
+    team_graph = defaultdict(lambda: defaultdict(set))
+    for (team, yr), drivers in slot.items():
+        for i, a in enumerate(drivers):
+            for b in drivers[i+1:]:
+                if a != b:
+                    graph[a].add(b)
+                    graph[b].add(a)
+                    team_graph[a][b].add((team, yr))
+                    team_graph[b][a].add((team, yr))
+
+    return dict(graph), {k: dict(v) for k, v in team_graph.items()}
+
+_CHAIN_GRAPH, _CHAIN_TEAM_GRAPH = _build_chain_graph()
+
+CHAIN_POOL = sorted(
+    d for d in _CHAIN_GRAPH
+    if d in SERIES_F1.drivers_meta and (
+        SERIES_F1.drivers_meta[d]["wins"] > 0 or
+        SERIES_F1.drivers_meta[d]["podiums"] >= 3
+    )
+)
+
+def _chain_bfs(start, end):
+    from collections import deque
+    if start == end: return [start]
+    visited = {start: None}
+    queue = deque([start])
+    while queue:
+        node = queue.popleft()
+        for nb in _CHAIN_GRAPH.get(node, set()):
+            if nb not in visited:
+                visited[nb] = node
+                if nb == end:
+                    path = []; cur = end
+                    while cur: path.append(cur); cur = visited[cur]
+                    return list(reversed(path))
+                queue.append(nb)
+    return None
+
+def _chain_teams_between(a, b):
+    """Devuelve lista de strings 'Equipo (año)' donde a y b fueron compañeros."""
+    pairs = sorted(_CHAIN_TEAM_GRAPH.get(a, {}).get(b, set()))
+    # Agrupar por equipo, quedarnos con el primer año de cada equipo
+    by_team = {}
+    for team, yr in pairs:
+        if team not in by_team:
+            by_team[team] = yr
+    return [f"{t} ({y})" for t, y in sorted(by_team.items())]
+
+def _pick_chain_pair(min_hops=2, max_hops=4):
+    for _ in range(500):
+        a, b = random.sample(CHAIN_POOL, 2)
+        path = _chain_bfs(a, b)
+        if path and min_hops <= len(path)-1 <= max_hops:
+            return a, b, path
+    a, b = random.sample(CHAIN_POOL, 2)
+    return a, b, _chain_bfs(a, b) or [a, b]
+
+# ══════════════════════════════════════════════════════════════════
+#  MODO 7 — CADENA DE PILOTOS
+# ══════════════════════════════════════════════════════════════════
+class ChainGame:
+    DIFFS = {
+        "🟢 Fácil":    {"min_hops": 2, "max_hops": 3, "max_steps": 8,  "pts_base": 200},
+        "🟡 Medio":    {"min_hops": 3, "max_hops": 4, "max_steps": 6,  "pts_base": 400},
+        "🔴 Difícil":  {"min_hops": 4, "max_hops": 5, "max_steps": 5,  "pts_base": 700},
+    }
+
+    def __init__(self):
+        self.diff       = "🟡 Medio"
+        self.start      = None
+        self.end        = None
+        self.chain      = []
+        self.optimal    = 0
+        self.steps_left = 0
+        self.solved     = False
+        self.failed     = False
+        self.score      = 0
+        self.total_pts  = self._load_pts()
+        self._build_ui()
+
+    # ── Persistencia ─────────────────────────────────────────────
+    def _load_pts(self):
+        try:
+            import json, pathlib
+            d = json.loads(pathlib.Path("~/.f1grid_data.json").expanduser().read_text())
+            return d.get("total_pts", 0)
+        except Exception:
+            return 0
+
+    def _save_pts(self, extra):
+        try:
+            import json, pathlib
+            p = pathlib.Path("~/.f1grid_data.json").expanduser()
+            d = json.loads(p.read_text()) if p.exists() else {}
+            d["total_pts"] = d.get("total_pts", 0) + extra
+            p.write_text(json.dumps(d))
+            self.total_pts = d["total_pts"]
+        except Exception:
+            pass
+
+    # ── UI ────────────────────────────────────────────────────────
+    def _build_ui(self):
+        self.output = widgets.Output()
+
+        title = widgets.HTML(
+            "<h2 style='font-family:monospace;color:#e10600;margin:0'>"
+            "🔗 CADENA DE PILOTOS</h2>"
+            "<p style='font-family:monospace;font-size:12px;color:#888;margin:2px 0 0'>"
+            "Conectá dos pilotos pasando por compañeros de equipo</p>"
+        )
+
+        diff_lbl = widgets.Label("Dificultad:")
+        self.diff_sel = widgets.ToggleButtons(
+            options=list(self.DIFFS.keys()),
+            value=self.diff,
+            style={"button_width": "110px"},
+        )
+        self.diff_sel.observe(self._on_diff, names="value")
+
+        self.btn_new = widgets.Button(
+            description="🆕 Nueva Cadena", button_style="danger",
+            layout=widgets.Layout(width="150px"),
+        )
+        self.btn_new.on_click(self._new_game)
+
+        self.pts_label = widgets.HTML(self._pts_html())
+
+        top_bar = widgets.HBox(
+            [diff_lbl, self.diff_sel, self.btn_new, self.pts_label],
+            layout=widgets.Layout(align_items="center", gap="10px",
+                                  flex_flow="row wrap", margin="8px 0"),
+        )
+
+        self.main_widget = widgets.VBox(
+            [title, top_bar, self.output],
+            layout=widgets.Layout(
+                padding="14px", border="2px solid #e10600",
+                border_radius="10px", max_width="900px",
+            ),
+        )
+        display(self.main_widget)
+
+    def _pts_html(self):
+        return (f"<span style='font-family:monospace;font-size:13px'>"
+                f"⭐ {self.total_pts} pts</span>")
+
+    def _on_diff(self, change):
+        self.diff = change["new"]
+
+    # ── Nueva partida ─────────────────────────────────────────────
+    def _new_game(self, b=None):
+        cfg = self.DIFFS[self.diff]
+        self.start, self.end, optimal_path = _pick_chain_pair(
+            cfg["min_hops"], cfg["max_hops"]
+        )
+        self.optimal    = len(optimal_path) - 1
+        self.chain      = [self.start]
+        self.steps_left = cfg["max_steps"]
+        self.solved     = False
+        self.failed     = False
+        self.score      = 0
+        self._render()
+
+    # ── Render principal ──────────────────────────────────────────
+    def _render(self):
+        FLAGS_NAT = {
+            "española":"🇪🇸","británica":"🇬🇧","alemana":"🇩🇪","finlandesa":"🇫🇮",
+            "australiana":"🇦🇺","brasileña":"🇧🇷","mexicana":"🇲🇽","francesa":"🇫🇷",
+            "monegasca":"🇲🇨","neerlandesa":"🇳🇱","argentina":"🇦🇷","italiana":"🇮🇹",
+            "japonesa":"🇯🇵","austriaca":"🇦🇹","colombiana":"🇨🇴","danesa":"🇩🇰",
+            "neozelandesa":"🇳🇿","sueca":"🇸🇪","sudafricana":"🇿🇦","estadounidense":"🇺🇸",
+            "suiza":"🇨🇭","belga":"🇧🇪","venezolana":"🇻🇪","tailandesa":"🇹🇭",
+            "canadiense":"🇨🇦","rusa":"🇷🇺","portuguesa":"🇵🇹","húngara":"🇭🇺",
+            "irlandesa":"🇮🇪","china":"🇨🇳","noruega":"🇳🇴","estonia":"🇪🇪",
+            "polaca":"🇵🇱","turca":"🇹🇷","indonesia":"🇮🇩","checa":"🇨🇿",
+            "ecuatoriana":"🇪🇨","paraguaya":"🇵🇾",
+        }
+        def nf(nat): return FLAGS_NAT.get(nat, "🏁")
+
+        # Acumular todos los widgets; un único display() al final evita
+        # problemas de contexto cuando _render se llama desde callbacks.
+        parts = []
+
+        if self.start is None:
+            parts.append(widgets.HTML(
+                "<div style='font-family:monospace;color:#888;padding:12px'>"
+                "Presioná 🆕 Nueva Cadena para empezar.</div>"
+            ))
+            self.output.clear_output(wait=True)
+            with self.output:
+                display(widgets.VBox(parts))
+            return
+
+        # ── Header: inicio y destino ──────────────────────────
+        meta_a = SERIES_F1.drivers_meta[self.start]
+        meta_b = SERIES_F1.drivers_meta[self.end]
+        parts.append(widgets.HTML(
+            f"<div style='display:flex;gap:20px;align-items:center;margin:10px 0'>"
+            f"<div style='background:#1a0000;border:2px solid #e10600;border-radius:8px;"
+            f"padding:12px 20px;text-align:center;min-width:160px'>"
+            f"<div style='font-size:1.8rem'>{nf(meta_a['nationality'])}</div>"
+            f"<div style='font-family:monospace;font-size:14px;font-weight:bold;"
+            f"color:#e10600'>{self.start.title()}</div>"
+            f"<div style='font-size:10px;color:#666'>INICIO</div></div>"
+            f"<div style='font-family:monospace;text-align:center;color:#888'>"
+            f"⏩ {self.optimal} salto{'s' if self.optimal!=1 else ''} óptimo<br>"
+            f"🔢 {self.steps_left} pasos restantes</div>"
+            f"<div style='background:#001a00;border:2px solid #2e7d32;border-radius:8px;"
+            f"padding:12px 20px;text-align:center;min-width:160px'>"
+            f"<div style='font-size:1.8rem'>{nf(meta_b['nationality'])}</div>"
+            f"<div style='font-family:monospace;font-size:14px;font-weight:bold;"
+            f"color:#2e7d32'>{self.end.title()}</div>"
+            f"<div style='font-size:10px;color:#666'>DESTINO</div></div>"
+            f"</div>"
+        ))
+
+        # ── Cadena construida ─────────────────────────────────
+        if len(self.chain) > 1 or self.solved or self.failed:
+            chain_html = "<div style='margin:8px 0;font-family:monospace;font-size:13px'><b>Tu cadena:</b><br>"
+            for i, driver in enumerate(self.chain):
+                meta  = SERIES_F1.drivers_meta.get(driver, {})
+                color = "#e10600" if i == 0 else "#2e7d32" if driver == self.end else "#ffd700"
+                chain_html += (
+                    f"<span style='background:#1a1a1a;border:1px solid {color};"
+                    f"border-radius:4px;padding:2px 8px;color:{color}'>"
+                    f"{nf(meta.get('nationality',''))} {driver.title()}</span>"
+                )
+                if i < len(self.chain) - 1:
+                    teams    = _chain_teams_between(driver, self.chain[i+1])
+                    team_str = teams[0] if teams else "?"
+                    chain_html += f" <span style='color:#444'>—[{team_str}]→</span> "
+            chain_html += "</div>"
+            parts.append(widgets.HTML(chain_html))
+
+        # ── Mensaje final ─────────────────────────────────────
+        if self.solved:
+            hops  = len(self.chain) - 1
+            bonus = max(0, self.optimal - hops + 1)
+            cfg   = self.DIFFS[self.diff]
+            pts   = cfg["pts_base"] + bonus * 100
+            msg   = (f"🏆 ¡RESUELTO en {hops} salto{'s' if hops!=1 else ''}! "
+                     f"(óptimo: {self.optimal}) — +{pts} pts")
+            if hops <= self.optimal:
+                msg += " 🌟 ¡CADENA ÓPTIMA!"
+            parts.append(widgets.HTML(
+                f"<div style='background:#0a2a0a;border:2px solid #2e7d32;"
+                f"border-radius:8px;padding:10px;font-family:monospace;"
+                f"font-size:14px;color:#00c853'>{msg}</div>"
+            ))
+        elif self.failed:
+            parts.append(widgets.HTML(
+                f"<div style='background:#2a0a0a;border:2px solid #c62828;"
+                f"border-radius:8px;padding:10px;font-family:monospace;"
+                f"font-size:14px;color:#ef9a9a'>"
+                f"❌ Sin pasos restantes. Presioná 🆕 Nueva Cadena.</div>"
+            ))
+
+        # ── Input siguiente eslabón (solo si el juego sigue) ──
+        if not self.failed and not self.solved:
+            current   = self.chain[-1]
+            neighbors = sorted(
+                _CHAIN_GRAPH.get(current, set()) - set(self.chain),
+                key=lambda x: x.title()
+            )
+            info = widgets.HTML(
+                f"<div style='font-family:monospace;font-size:12px;color:#888;margin:6px 0'>"
+                f"Compañeros de <b style='color:#ffd700'>{current.title()}</b>: "
+                f"{len(neighbors)} disponibles</div>"
+            )
+            self.next_sel = widgets.Dropdown(
+                options=[""] + [n.title() for n in neighbors],
+                value="",
+                layout=widgets.Layout(width="280px"),
+            )
+            self.next_sel.observe(self._on_select_change, names="value")
+            self.feedback_html = widgets.HTML("")
+            btn_add = widgets.Button(
+                description="➕ Agregar eslabón",
+                button_style="primary",
+                layout=widgets.Layout(width="160px"),
+            )
+            btn_add.on_click(self._add_link)
+            parts.append(widgets.VBox([
+                info,
+                widgets.HBox(
+                    [self.next_sel, btn_add, self.feedback_html],
+                    layout=widgets.Layout(align_items="center", gap="10px")
+                ),
+            ]))
+
+        # ── Único display al final ────────────────────────────
+        self.output.clear_output(wait=True)
+        with self.output:
+            display(widgets.VBox(parts))
+
+    def _show_board(self): pass   # reemplazado por _render
+
+    def _show_input(self): pass   # reemplazado por _render
+
+    def _on_select_change(self, change):
+        val = normalize(change["new"])
+        if not val:
+            self.feedback_html.value = ""
+            return
+        if val == self.end:
+            self.feedback_html.value = (
+                "<span style='color:#00c853;font-family:monospace'>"
+                "🎯 ¡Este es el destino!</span>"
+            )
+        elif val in _CHAIN_GRAPH.get(self.end, set()):
+            self.feedback_html.value = (
+                "<span style='color:#ffd700;font-family:monospace'>"
+                "🔥 ¡Está a 1 paso del destino!</span>"
+            )
+        else:
+            self.feedback_html.value = ""
+
+    def _add_link(self, b=None):
+        val = normalize(self.next_sel.value)
+        if not val:
+            return
+        self.chain.append(val)
+        self.steps_left -= 1
+
+        if val == self.end:
+            self.solved = True
+            hops   = len(self.chain) - 1
+            bonus  = max(0, self.optimal - hops + 1)
+            cfg    = self.DIFFS[self.diff]
+            pts    = cfg["pts_base"] + bonus * 100
+            self.score = pts
+            self._save_pts(pts)
+            self.pts_label.value = self._pts_html()
+        elif self.steps_left <= 0:
+            self.failed = True
+
+        self._render()
+
+
+# ══════════════════════════════════════════════════════════════════
+#  MODO 8 — ¿QUIÉN GANÓ?
+# ══════════════════════════════════════════════════════════════════
+class WhoWonGame:
+    """
+    Te muestro un año y un Gran Premio.
+    ¿Quién ganó esa carrera? Elegí entre 4 opciones.
+    Racha infinita. Modo diario. Puntos según velocidad.
+    """
+    PTS_TABLE = [500, 400, 300, 200, 100]   # por tiempo de respuesta
+
+    def __init__(self):
+        self._data    = self._build_pool()
+        self.streak   = 0
+        self.score    = 0
+        self.total    = 0
+        self.correct  = 0
+        self.answered = False
+        self._q       = None          # pregunta actual
+        self._t0      = None          # timestamp de inicio
+        self.daily    = False
+
+        self._load_pts()
+        self._build_ui()
+
+    # ── Persistencia ─────────────────────────────────────────────
+    def _load_pts(self):
+        import json, os
+        p = os.path.expanduser("~/.f1grid_data.json")
+        try:
+            d = json.loads(open(p).read())
+            self.score = d.get("whowon_score", 0)
+        except Exception:
+            pass
+
+    def _save_pts(self, pts):
+        import json, os
+        p = os.path.expanduser("~/.f1grid_data.json")
+        try:
+            d = json.loads(open(p).read()) if os.path.exists(p) else {}
+        except Exception:
+            d = {}
+        d["whowon_score"] = self.score + pts
+        self.score += pts
+        open(p, "w").write(json.dumps(d))
+
+    # ── Pool de preguntas ─────────────────────────────────────────
+    def _build_pool(self):
+        pool = []
+        for year, gps in GP_RESULTS.items():
+            for gp, results in gps.items():
+                if results:
+                    pool.append((year, gp, results[0]))
+        return pool
+
+    def _all_winners(self):
+        return list({r[2] for r in self._data})
+
+    # ── UI ────────────────────────────────────────────────────────
+    def _build_ui(self):
+        C = COLORS
+
+        # Controles superiores
+        self.btn_new   = widgets.Button(description="🆕 Nueva Pregunta",
+                                        button_style="warning",
+                                        layout=widgets.Layout(width="160px"))
+        self.btn_daily = widgets.Button(description="📅 Modo Diario",
+                                        button_style="info",
+                                        layout=widgets.Layout(width="130px"))
+        self.pts_label = widgets.HTML(self._pts_html())
+
+        self.btn_new.on_click(self._new_question)
+        self.btn_daily.on_click(self._daily_question)
+
+        top_bar = widgets.HBox(
+            [self.btn_new, self.btn_daily, self.pts_label],
+            layout=widgets.Layout(gap="10px", align_items="center", margin="0 0 10px 0")
+        )
+
+        # Estadísticas rápidas
+        self.stats_label = widgets.HTML(self._stats_html())
+
+        # Área de juego
+        self.output = widgets.Output()
+
+        self.main = widgets.VBox(
+            [top_bar, self.stats_label, self.output],
+            layout=widgets.Layout(max_width="680px")
+        )
+        display(self.main)
+        self._new_question()
+
+    def _pts_html(self):
+        return (f"<span style='font-family:monospace;font-size:13px;color:#ffd700'>"
+                f"⭐ {self.score} pts</span>")
+
+    def _stats_html(self):
+        pct = int(self.correct / self.total * 100) if self.total else 0
+        return (
+            f"<div style='font-family:monospace;font-size:12px;color:#888'>"
+            f"🔥 Racha: <b style='color:#ffd700'>{self.streak}</b>  |  "
+            f"✅ {self.correct}/{self.total} ({pct}%)  |  "
+            f"</div>"
+        )
+
+    # ── Preguntas ─────────────────────────────────────────────────
+    def _pick_question(self, seed=None):
+        import time
+        rng = random.Random(seed) if seed is not None else random
+        year, gp, winner = rng.choice(self._data)
+
+        # 3 distractores: otros ganadores reales
+        all_w = [w for w in self._all_winners() if w != winner]
+        distractors = rng.sample(all_w, min(3, len(all_w)))
+        options = [winner] + distractors
+        rng.shuffle(options)
+        return {"year": year, "gp": gp, "winner": winner, "options": options}
+
+    def _new_question(self, b=None):
+        self.daily    = False
+        self._q       = self._pick_question()
+        self.answered = False
+        self._t0      = __import__("time").time()
+        self._render()
+
+    def _daily_question(self, b=None):
+        import datetime
+        seed = int(datetime.date.today().strftime("%Y%m%d")) + 80000
+        self.daily    = True
+        self._q       = self._pick_question(seed=seed)
+        self.answered = False
+        self._t0      = __import__("time").time()
+        self._render()
+
+    # ── Respuesta ─────────────────────────────────────────────────
+    def _answer(self, chosen):
+        if self.answered:
+            return
+        import time
+        elapsed = time.time() - self._t0
+        self.answered = True
+        self.total   += 1
+        correct = (chosen == self._q["winner"])
+
+        if correct:
+            self.correct += 1
+            self.streak  += 1
+            # puntos según velocidad: < 3s, <6s, <10s, <20s, resto
+            if   elapsed <  3: pts = self.PTS_TABLE[0]
+            elif elapsed <  6: pts = self.PTS_TABLE[1]
+            elif elapsed < 10: pts = self.PTS_TABLE[2]
+            elif elapsed < 20: pts = self.PTS_TABLE[3]
+            else:              pts = self.PTS_TABLE[4]
+            self._save_pts(pts)
+            self.pts_label.value = self._pts_html()
+        else:
+            self.streak = 0
+            pts = 0
+
+        self._q["chosen"]  = chosen
+        self._q["pts"]     = pts
+        self._q["elapsed"] = elapsed
+        self._q["correct"] = correct
+        self.stats_label.value = self._stats_html()
+        self._render()
+
+    # ── Render ────────────────────────────────────────────────────
+    def _render(self):
+        if self._q is None:
+            return
+
+        q = self._q
+        parts = []
+
+        # ── Título del GP ──────────────────────────────────────
+        daily_badge = " 📅 <span style='color:#64b5f6'>DIARIO</span>" if self.daily else ""
+        parts.append(widgets.HTML(
+            f"<div style='background:#111;border:2px solid #e10600;border-radius:10px;"
+            f"padding:16px 24px;margin:8px 0;text-align:center'>"
+            f"<div style='font-family:monospace;font-size:11px;color:#888;margin-bottom:4px'>"
+            f"¿QUIÉN GANÓ?{daily_badge}</div>"
+            f"<div style='font-size:22px;font-weight:bold;font-family:monospace;"
+            f"color:#ffd700'>{q['year']} — {q['gp'].upper()}</div>"
+            f"</div>"
+        ))
+
+        if not self.answered:
+            # ── Botones de opción ──────────────────────────────
+            btn_row = []
+            for opt in q["options"]:
+                meta = SERIES_F1.drivers_meta.get(opt, {})
+                nat  = meta.get("nationality", "")
+                flag = {"española":"🇪🇸","británica":"🇬🇧","alemana":"🇩🇪",
+                        "finlandesa":"🇫🇮","australiana":"🇦🇺","brasileña":"🇧🇷",
+                        "mexicana":"🇲🇽","francesa":"🇫🇷","monegasca":"🇲🇨",
+                        "neerlandesa":"🇳🇱","argentina":"🇦🇷","italiana":"🇮🇹",
+                        "finlandesa":"🇫🇮","austriaca":"🇦🇹"}.get(nat, "🏁")
+                btn = widgets.Button(
+                    description=f"{flag} {opt.title()}",
+                    layout=widgets.Layout(width="260px", height="44px"),
+                    style={"font_size": "13px"},
+                )
+                btn.on_click(lambda b, o=opt: self._answer(o))
+                btn_row.append(btn)
+
+            parts.append(widgets.VBox([
+                widgets.HBox(btn_row[:2],
+                             layout=widgets.Layout(gap="12px", margin="8px 0")),
+                widgets.HBox(btn_row[2:],
+                             layout=widgets.Layout(gap="12px", margin="0 0 8px 0")),
+            ]))
+        else:
+            # ── Resultado ─────────────────────────────────────
+            winner = q["winner"]
+            chosen = q.get("chosen", "")
+            ok     = q.get("correct", False)
+            pts    = q.get("pts", 0)
+            secs   = q.get("elapsed", 0)
+
+            meta_w = SERIES_F1.drivers_meta.get(winner, {})
+            wins   = meta_w.get("wins", "?")
+            champs = meta_w.get("champion", 0)
+            champ_str = f" 🏆×{champs}" if champs else ""
+
+            color   = "#00c853" if ok else "#ef9a9a"
+            bg      = "#0a2a0a" if ok else "#2a0a0a"
+            border  = "#2e7d32" if ok else "#c62828"
+            icon    = "✅" if ok else "❌"
+            msg_top = f"{icon} ¡CORRECTO! +{pts} pts ({secs:.1f}s)" if ok else f"{icon} INCORRECTO — Era <b>{winner.title()}</b>"
+
+            # Mostrar todas las opciones coloreadas
+            opts_html = "<div style='display:flex;flex-wrap:wrap;gap:8px;margin:10px 0'>"
+            for opt in q["options"]:
+                if opt == winner:
+                    c = "#00c853"; bc = "#2e7d32"; bg2 = "#0a2a0a"
+                elif opt == chosen and not ok:
+                    c = "#ef9a9a"; bc = "#c62828"; bg2 = "#2a0a0a"
+                else:
+                    c = "#555"; bc = "#333"; bg2 = "#0a0a0a"
+                opts_html += (
+                    f"<span style='background:{bg2};border:1px solid {bc};"
+                    f"border-radius:6px;padding:6px 14px;font-family:monospace;"
+                    f"font-size:13px;color:{c}'>{opt.title()}</span>"
+                )
+            opts_html += "</div>"
+
+            parts.append(widgets.HTML(
+                f"<div style='background:{bg};border:2px solid {border};"
+                f"border-radius:8px;padding:12px 16px;font-family:monospace'>"
+                f"<div style='font-size:15px;color:{color};margin-bottom:8px'>{msg_top}</div>"
+                f"{opts_html}"
+                f"<div style='font-size:11px;color:#666;margin-top:6px'>"
+                f"{winner.title()} — {wins} victorias en F1{champ_str}</div>"
+                f"</div>"
+            ))
+
+            btn_next = widgets.Button(
+                description="▶️ Siguiente",
+                button_style="warning",
+                layout=widgets.Layout(width="140px", margin="8px 0 0 0")
+            )
+            btn_next.on_click(self._new_question)
+            parts.append(btn_next)
+
+        self.output.clear_output(wait=True)
+        with self.output:
+            display(widgets.VBox(parts))
+
+
+# ══════════════════════════════════════════════════════════════════
+#  BASE DE DATOS — CIRCUITOS F1
+# ══════════════════════════════════════════════════════════════════
+F1_CIRCUITS = {
+    "monaco": {
+        "display":   "Mónaco",
+        "pais":      "Mónaco",
+        "ciudad":    "Monte Carlo",
+        "longitud":  3.337,
+        "vueltas":   78,
+        "primer_gp": 1950,
+        "tipo":      "urbano",
+        "caracteristicas": [
+            "El circuito más lento del calendario",
+            "Tiene un túnel en su trazado",
+            "Las barreras están a centímetros del asfalto",
+            "Pasar por aquí sin tocar las barreras es casi un milagro",
+            "Celebrado en las calles de un principado",
+            "Tiene el famoso hairpin de la Curva de la Rascasse",
+        ],
+        "record_piloto": "max verstappen",
+        "record_año":    2023,
+        "ganadores":     ["ayrton senna", "graham hill", "michael schumacher"],
+        "apodo":         "La Joya de la Corona",
+    },
+    "monza": {
+        "display":   "Monza",
+        "pais":      "Italia",
+        "ciudad":    "Monza",
+        "longitud":  5.793,
+        "vueltas":   53,
+        "primer_gp": 1950,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Conocido como el Templo de la Velocidad",
+            "Es uno de los circuitos más rápidos del calendario",
+            "Las rectas largas hacen que la velocidad punta sea máxima",
+            "Se encuentra dentro de un parque histórico",
+            "El público tifosi es mundialmente famoso",
+            "Tiene una chicane en la primera curva",
+        ],
+        "record_piloto": "rubens barrichello",
+        "record_año":    2004,
+        "ganadores":     ["michael schumacher", "lewis hamilton", "sebastian vettel"],
+        "apodo":         "El Templo de la Velocidad",
+    },
+    "silverstone": {
+        "display":   "Silverstone",
+        "pais":      "Gran Bretaña",
+        "ciudad":    "Northamptonshire",
+        "longitud":  5.891,
+        "vueltas":   52,
+        "primer_gp": 1950,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Fue el escenario del primer Gran Premio de F1 de la historia",
+            "Es una antigua base de la RAF",
+            "Tiene la famosa curva de alta velocidad Copse",
+            "La recta de Hangar es una de las más rápidas del mundo",
+            "Copse, Maggots, Becketts forman uno de los mejores sectores del calendario",
+            "El clima suele ser impredecible",
+        ],
+        "record_piloto": "max verstappen",
+        "record_año":    2020,
+        "ganadores":     ["lewis hamilton", "nigel mansell", "alain prost"],
+        "apodo":         "El hogar del automovilismo",
+    },
+    "spa": {
+        "display":   "Spa-Francorchamps",
+        "pais":      "Bélgica",
+        "ciudad":    "Stavelot",
+        "longitud":  7.004,
+        "vueltas":   44,
+        "primer_gp": 1950,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Es el circuito más largo del calendario actual",
+            "Tiene la famosa curva Eau Rouge/Raidillon a plena velocidad",
+            "El clima cambia de sección a sección del circuito",
+            "Puede llover en un sector y estar seco en otro",
+            "Combina alta velocidad con secciones técnicas",
+            "Considerado por muchos pilotos como el mejor circuito del mundo",
+        ],
+        "record_piloto": "valtteri bottas",
+        "record_año":    2018,
+        "ganadores":     ["michael schumacher", "ayrton senna", "sebastian vettel"],
+        "apodo":         "El Circuito de los Faraones",
+    },
+    "suzuka": {
+        "display":   "Suzuka",
+        "pais":      "Japón",
+        "ciudad":    "Suzuka",
+        "longitud":  5.807,
+        "vueltas":   53,
+        "primer_gp": 1987,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Tiene un trazado en forma de ocho con un paso elevado",
+            "La S de la primera chicane es icónica",
+            "La curva 130R es una de las más rápidas del mundo",
+            "Construido por Honda para probar sus autos",
+            "Escenario de épicas batallas por el campeonato",
+            "Tiene el famoso Degner Corner y el Casino Triangle",
+        ],
+        "record_piloto": "lewis hamilton",
+        "record_año":    2019,
+        "ganadores":     ["michael schumacher", "ayrton senna", "max verstappen"],
+        "apodo":         "El Circuito del Ocho",
+    },
+    "interlagos": {
+        "display":   "Interlagos",
+        "pais":      "Brasil",
+        "ciudad":    "São Paulo",
+        "longitud":  4.309,
+        "vueltas":   71,
+        "primer_gp": 1973,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Se corre en sentido antihorario",
+            "Tiene la famosa curva Senna S a la entrada",
+            "El nombre significa 'entre lagos'",
+            "Las lluvias tropicales son habituales en la carrera",
+            "Tiene una recta de los boxes muy larga",
+            "Escenario de muchos campeonatos decididos en la última vuelta",
+        ],
+        "record_piloto": "valtteri bottas",
+        "record_año":    2018,
+        "ganadores":     ["ayrton senna", "michael schumacher", "lewis hamilton"],
+        "apodo":         "La Catedral del Automovilismo Brasileño",
+    },
+    "barcelona": {
+        "display":   "Barcelona",
+        "pais":      "España",
+        "ciudad":    "Montmeló",
+        "longitud":  4.657,
+        "vueltas":   66,
+        "primer_gp": 1991,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Es la sede habitual de los test de pretemporada",
+            "Los pilotos lo conocen de memoria por los test",
+            "La curva Campsa ofrece gran espectáculo",
+            "Tiene una larga recta principal para adelantamientos",
+            "El asfalto se degrada mucho en el sector medio",
+            "La curva 3 Nissan fue rediseñada para facilitar adelantamientos",
+        ],
+        "record_piloto": "max verstappen",
+        "record_año":    2023,
+        "ganadores":     ["michael schumacher", "lewis hamilton", "max verstappen"],
+        "apodo":         "El Laboratorio",
+    },
+    "abu dhabi": {
+        "display":   "Abu Dhabi",
+        "pais":      "Emiratos Árabes",
+        "ciudad":    "Abu Dhabi",
+        "longitud":  5.281,
+        "vueltas":   58,
+        "primer_gp": 2009,
+        "tipo":      "semipermanente",
+        "caracteristicas": [
+            "La carrera empieza de día y termina de noche",
+            "Se encuentra en la isla artificial de Yas Marina",
+            "Tiene un hotel de lujo integrado en el trazado",
+            "Es la última carrera del calendario desde 2009",
+            "Fue rediseñado en 2021 para facilitar adelantamientos",
+            "El hotel Yas Viceroy fue parte icónica del trazado original",
+        ],
+        "record_piloto": "max verstappen",
+        "record_año":    2021,
+        "ganadores":     ["sebastian vettel", "lewis hamilton", "max verstappen"],
+        "apodo":         "La Pista del Amanecer al Atardecer",
+    },
+    "budapest": {
+        "display":   "Hungaroring",
+        "pais":      "Hungría",
+        "ciudad":    "Budapest",
+        "longitud":  4.381,
+        "vueltas":   70,
+        "primer_gp": 1986,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Fue el primer GP detrás del Telón de Acero",
+            "Es conocido por ser muy difícil para adelantar",
+            "El clima húmedo en agosto suele sorprender",
+            "La curva 4 tiene la mejor zona de frenada del circuito",
+            "El agarre suele ser muy bajo fuera de la línea de carrera",
+            "Se parece a Mónaco sin barreras, según los pilotos",
+        ],
+        "record_piloto": "lewis hamilton",
+        "record_año":    2020,
+        "ganadores":     ["ayrton senna", "michael schumacher", "lewis hamilton"],
+        "apodo":         "El Mónaco del Este",
+    },
+    "zandvoort": {
+        "display":   "Zandvoort",
+        "pais":      "Países Bajos",
+        "ciudad":    "Zandvoort",
+        "longitud":  4.259,
+        "vueltas":   72,
+        "primer_gp": 1952,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Tiene peraltes extremos en sus curvas lentas",
+            "Volvió al calendario en 2021 tras 35 años de ausencia",
+            "Está rodeado de dunas de arena",
+            "El público naranja holandés llena las gradas",
+            "Fue rediseñado con bancos elevados tipo NASCAR",
+            "La curva Hugenholtz es la más famosa del trazado",
+        ],
+        "record_piloto": "max verstappen",
+        "record_año":    2023,
+        "ganadores":     ["niki lauda", "james hunt", "max verstappen"],
+        "apodo":         "La Catedral Naranja",
+    },
+    "imola": {
+        "display":   "Imola",
+        "pais":      "Italia",
+        "ciudad":    "Imola",
+        "longitud":  4.909,
+        "vueltas":   63,
+        "primer_gp": 1980,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Es el único circuito con dos nombres de santos en su nombre oficial",
+            "Escenario de la tragedia de Senna en 1994",
+            "Tiene la famosa curva Tamburello, hoy una chicane",
+            "Volvió al calendario en 2020 tras 14 años de ausencia",
+            "La zona de boxes está al final de la recta principal",
+            "El circuito se llama Enzo e Dino Ferrari",
+        ],
+        "record_piloto": "rubens barrichello",
+        "record_año":    2004,
+        "ganadores":     ["ayrton senna", "michael schumacher", "max verstappen"],
+        "apodo":         "El Circuito de Senna",
+    },
+    "singapore": {
+        "display":   "Singapur",
+        "pais":      "Singapur",
+        "ciudad":    "Marina Bay",
+        "longitud":  5.063,
+        "vueltas":   62,
+        "primer_gp": 2008,
+        "tipo":      "urbano",
+        "caracteristicas": [
+            "Primer Gran Premio nocturno de la historia de F1",
+            "Se corre completamente de noche bajo miles de focos",
+            "El calor y la humedad son extremos para los pilotos",
+            "Tiene más de 20 curvas y pocas rectas largas",
+            "Pasa por el centro financiero de la ciudad",
+            "El Safety Car aparece con mucha frecuencia aquí",
+        ],
+        "record_piloto": "kevin magnussen",
+        "record_año":    2018,
+        "ganadores":     ["sebastian vettel", "lewis hamilton", "carlos sainz"],
+        "apodo":         "La Carrera Nocturna",
+    },
+    "baku": {
+        "display":   "Bakú",
+        "pais":      "Azerbaiyán",
+        "ciudad":    "Bakú",
+        "longitud":  6.003,
+        "vueltas":   51,
+        "primer_gp": 2016,
+        "tipo":      "urbano",
+        "caracteristicas": [
+            "Tiene la segunda recta más larga del calendario",
+            "Pasa por la Ciudad Vieja declarada Patrimonio de la Humanidad",
+            "El tramo del castillo es increíblemente estrecho",
+            "Los pinchazos en la última vuelta son famosos aquí",
+            "Los Safety Cars son muy frecuentes en este circuito",
+            "La recta principal supera los 340 km/h de velocidad punta",
+        ],
+        "record_piloto": "charles leclerc",
+        "record_año":    2019,
+        "ganadores":     ["nico rosberg", "sergio perez", "max verstappen"],
+        "apodo":         "La Pista del Caos",
+    },
+    "montreal": {
+        "display":   "Montreal",
+        "pais":      "Canadá",
+        "ciudad":    "Montreal",
+        "longitud":  4.361,
+        "vueltas":   70,
+        "primer_gp": 1978,
+        "tipo":      "semipermanente",
+        "caracteristicas": [
+            "Se encuentra en la Isla Notre-Dame, artificial",
+            "Tiene la famosa Muralla de los Campeones al final",
+            "Es un circuito stop-and-go con frenadas muy duras",
+            "El DRS es muy efectivo en su larga recta principal",
+            "Lleva el nombre de un piloto local icónico",
+            "El muro exterior del último chicane ha destruido muchas carreras",
+        ],
+        "record_piloto": "valtteri bottas",
+        "record_año":    2019,
+        "ganadores":     ["michael schumacher", "lewis hamilton", "ayrton senna"],
+        "apodo":         "El Circuito Gilles Villeneuve",
+    },
+    "nurburgring": {
+        "display":   "Nürburgring",
+        "pais":      "Alemania",
+        "ciudad":    "Nürburg",
+        "longitud":  5.148,
+        "vueltas":   60,
+        "primer_gp": 1951,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "El circuito moderno se llama GP-Strecke",
+            "El antiguo Nordschleife tiene 20 km y es el más peligroso del mundo",
+            "Escenario del famoso accidente y recuperación de Niki Lauda en 1976",
+            "El clima aquí es absolutamente impredecible",
+            "Schumacher fue campeón aquí con Ferrari varias veces",
+            "Fue llamado el Infierno Verde por los pilotos clásicos",
+        ],
+        "record_piloto": "michael schumacher",
+        "record_año":    2004,
+        "ganadores":     ["michael schumacher", "lewis hamilton", "sebastian vettel"],
+        "apodo":         "El Infierno Verde",
+    },
+    "jeddah": {
+        "display":   "Jeddah",
+        "pais":      "Arabia Saudí",
+        "ciudad":    "Jeddah",
+        "longitud":  6.174,
+        "vueltas":   50,
+        "primer_gp": 2021,
+        "tipo":      "urbano",
+        "caracteristicas": [
+            "Es el circuito urbano más rápido del calendario",
+            "Tiene más de 27 curvas, casi todas en rápido",
+            "Las barreras están muy cerca de la pista",
+            "Visibilidad reducida por las curvas ciegas encadenadas",
+            "Las velocidades puntas superan los 330 km/h",
+            "Se inauguró en 2021 para el penúltimo GP de ese año",
+        ],
+        "record_piloto": "lewis hamilton",
+        "record_año":    2021,
+        "ganadores":     ["lewis hamilton", "max verstappen", "sergio perez"],
+        "apodo":         "La Autopista de Arabia",
+    },
+    "bahrain": {
+        "display":   "Bahréin",
+        "pais":      "Bahréin",
+        "ciudad":    "Sakhir",
+        "longitud":  5.412,
+        "vueltas":   57,
+        "primer_gp": 2004,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Fue el primer Gran Premio en Oriente Medio",
+            "La carrera nocturna crea un espectáculo visual único",
+            "El polvo del desierto suele irrumpir en la pista",
+            "Tiene una variante oval que se usó en 2020 como Sakhir GP",
+            "La zona de frenada de la curva 1 genera muchos adelantamientos",
+            "El asfalto abrasivo destruye los neumáticos con rapidez",
+        ],
+        "record_piloto": "pedro de la rosa",
+        "record_año":    2005,
+        "ganadores":     ["michael schumacher", "lewis hamilton", "sebastian vettel"],
+        "apodo":         "La Perla del Golfo",
+    },
+    "melbourne": {
+        "display":   "Melbourne",
+        "pais":      "Australia",
+        "ciudad":    "Melbourne",
+        "longitud":  5.278,
+        "vueltas":   58,
+        "primer_gp": 1996,
+        "tipo":      "semipermanente",
+        "caracteristicas": [
+            "Suele ser la primera carrera de la temporada",
+            "El asfalto nuevo al inicio del año da poca adherencia",
+            "Hay muchos Safety Cars en la primera vuelta",
+            "Se corre alrededor del lago Albert Park",
+            "El público australiano es muy festivo y ruidoso",
+            "Las calles se usan normalmente para el tráfico cotidiano",
+        ],
+        "record_piloto": "charles leclerc",
+        "record_año":    2022,
+        "ganadores":     ["michael schumacher", "damon hill", "lewis hamilton"],
+        "apodo":         "El Albert Park",
+    },
+    "shanghai": {
+        "display":   "Shanghai",
+        "pais":      "China",
+        "ciudad":    "Shanghai",
+        "longitud":  5.451,
+        "vueltas":   56,
+        "primer_gp": 2004,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Tiene la curva de apertura más larga del calendario",
+            "La curva 1-2 es un caracol descendente que dura varios segundos",
+            "Fue diseñado por Hermann Tilke",
+            "El sector final tiene una recta muy larga para DRS",
+            "Volvió al calendario en 2024 tras años de ausencia",
+            "La infraestructura del paddock es una de las más modernas",
+        ],
+        "record_piloto": "michael schumacher",
+        "record_año":    2004,
+        "ganadores":     ["michael schumacher", "lewis hamilton", "nico rosberg"],
+        "apodo":         "El Caracol",
+    },
+    "austin": {
+        "display":   "Austin (COTA)",
+        "pais":      "Estados Unidos",
+        "ciudad":    "Austin, Texas",
+        "longitud":  5.513,
+        "vueltas":   56,
+        "primer_gp": 2012,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Las siglas COTA significan Circuit of the Americas",
+            "Fue diseñado con inspiración en los mejores circuitos del mundo",
+            "La curva 1 es una de las subidas más espectaculares del calendario",
+            "Tiene el sector inspirado en Maggots y Becketts de Silverstone",
+            "Lewis Hamilton ganó aquí una cantidad histórica de veces",
+            "El terreno texano permite grandes cambios de elevación",
+        ],
+        "record_piloto": "charles leclerc",
+        "record_año":    2019,
+        "ganadores":     ["lewis hamilton", "sebastian vettel", "max verstappen"],
+        "apodo":         "El Circuito de las Américas",
+    },
+    "mexico": {
+        "display":   "México",
+        "pais":      "México",
+        "ciudad":    "Ciudad de México",
+        "longitud":  4.304,
+        "vueltas":   71,
+        "primer_gp": 1963,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Es el circuito a mayor altitud del calendario: 2200 metros sobre el nivel del mar",
+            "La delgadez del aire afecta el motor y la aerodinámica",
+            "Los frenos duran más por la menor resistencia del aire",
+            "El estadio al final del circuito crea un ambiente único",
+            "El público mexicano es uno de los más apasionados del mundo",
+            "Los equipos deben reconfigurar el auto para la altitud",
+        ],
+        "record_piloto": "valtteri bottas",
+        "record_año":    2021,
+        "ganadores":     ["nigel mansell", "max verstappen", "lewis hamilton"],
+        "apodo":         "El Estadio de la Fórmula 1",
+    },
+    "las vegas": {
+        "display":   "Las Vegas",
+        "pais":      "Estados Unidos",
+        "ciudad":    "Las Vegas",
+        "longitud":  6.201,
+        "vueltas":   50,
+        "primer_gp": 2023,
+        "tipo":      "urbano",
+        "caracteristicas": [
+            "La recta del Strip pasa frente a los casinos más famosos del mundo",
+            "La carrera se corre de madrugada hora local",
+            "El frío nocturno del desierto complica el calentamiento de neumáticos",
+            "Es uno de los circuitos más rápidos por las rectas largas",
+            "Tiene el Caesars Palace y el Bellagio en el trazado",
+            "Fue la gran apuesta de F1 para crecer en el mercado americano",
+        ],
+        "record_piloto": "oscar piastri",
+        "record_año":    2024,
+        "ganadores":     ["max verstappen", "carlos sainz"],
+        "apodo":         "La Carrera del Strip",
+    },
+    "qatar": {
+        "display":   "Catar",
+        "pais":      "Catar",
+        "ciudad":    "Losail",
+        "longitud":  5.380,
+        "vueltas":   57,
+        "primer_gp": 2021,
+        "tipo":      "permanente",
+        "caracteristicas": [
+            "Originalmente era un circuito de MotoGP",
+            "Tiene muchas curvas rápidas encadenadas sin mucha frenada",
+            "El calor extremo es el mayor enemigo de pilotos y neumáticos",
+            "Se corre de noche para evitar el calor diurno",
+            "Las degradaciones de neumáticos son brutales aquí",
+            "El Losail Circuit fue construido en tiempo récord",
+        ],
+        "record_piloto": "max verstappen",
+        "record_año":    2023,
+        "ganadores":     ["lewis hamilton", "max verstappen", "george russell"],
+        "apodo":         "El Horno del Desierto",
+    },
+    "miami": {
+        "display":   "Miami",
+        "pais":      "Estados Unidos",
+        "ciudad":    "Miami Gardens",
+        "longitud":  5.412,
+        "vueltas":   57,
+        "primer_gp": 2022,
+        "tipo":      "semipermanente",
+        "caracteristicas": [
+            "Se corre alrededor del estadio del equipo de fútbol americano Miami Dolphins",
+            "Tiene un lago artificial en el paddock que no lleva agua real",
+            "Fue construido en tiempo récord para la temporada 2022",
+            "Las curvas 14-16 son el sector más técnico del trazado",
+            "El calor y la humedad de Florida afectan mucho el rendimiento",
+            "El ambiente festivo y colorido es único en el calendario",
+        ],
+        "record_piloto": "max verstappen",
+        "record_año":    2023,
+        "ganadores":     ["max verstappen", "lando norris"],
+        "apodo":         "El Hard Rock Stadium Circuit",
+    },
+}
+
+
+# ══════════════════════════════════════════════════════════════════
+#  MODO 9 — ¿EN QUÉ CIRCUITO?
+# ══════════════════════════════════════════════════════════════════
+class CircuitGame:
+    """
+    Pistas progresivas sobre un circuito F1.
+    Elegís entre 4 opciones. Menos pistas usadas = más puntos.
+    Modo diario + racha + persistencia.
+    """
+    PTS_PER_PISTA = [600, 450, 300, 200, 100, 50]
+
+    FLAG_MAP = {
+        "Mónaco": "🇲🇨", "Italia": "🇮🇹", "Gran Bretaña": "🇬🇧", "Bélgica": "🇧🇪",
+        "Japón": "🇯🇵", "Brasil": "🇧🇷", "España": "🇪🇸", "Emiratos Árabes": "🇦🇪",
+        "Hungría": "🇭🇺", "Países Bajos": "🇳🇱", "Alemania": "🇩🇪", "Arabia Saudí": "🇸🇦",
+        "Bahréin": "🇧🇭", "Australia": "🇦🇺", "China": "🇨🇳", "Estados Unidos": "🇺🇸",
+        "México": "🇲🇽", "Singapur": "🇸🇬", "Azerbaiyán": "🇦🇿", "Canadá": "🇨🇦",
+        "Catar": "🇶🇦", "Francia": "🇫🇷", "Portugal": "🇵🇹", "Turquía": "🇹🇷",
+    }
+
+    def __init__(self):
+        self._score         = 0
+        self._streak        = 0
+        self._best_streak   = 0
+        self._total         = 0
+        self._correct       = 0
+        self._pistas_vistas = 0
+        self._answered      = False
+        self._circuit_key   = None
+        self._options       = []
+        self._vistos        = set()
+        self.daily          = False
+
+        self._load_pts()
+        self._build_ui()
+
+    # ── Persistencia ─────────────────────────────────────────────
+    def _data_path(self):
+        import os
+        return os.path.expanduser("~/.f1grid_data.json")
+
+    def _load_pts(self):
+        import json, os
+        try:
+            d = json.loads(open(self._data_path()).read())
+            self._score       = d.get("circuit_score", 0)
+            self._streak      = d.get("circuit_streak", 0)
+            self._best_streak = d.get("circuit_best", 0)
+        except Exception:
+            pass
+
+    def _save_pts(self, pts):
+        import json, os
+        p = self._data_path()
+        try:
+            d = json.loads(open(p).read()) if os.path.exists(p) else {}
+        except Exception:
+            d = {}
+        d["circuit_score"]  = d.get("circuit_score", 0) + pts
+        d["circuit_streak"] = self._streak
+        d["circuit_best"]   = self._best_streak
+        self._score = d["circuit_score"]
+        open(p, "w").write(json.dumps(d))
+
+    def _already_played_daily(self):
+        import datetime, json, os
+        today = datetime.date.today().isoformat()
+        key   = f"circuit-daily-{today}"
+        try:
+            d = json.loads(open(self._data_path()).read())
+            return d.get("daily_played", {}).get(key, False)
+        except Exception:
+            return False
+
+    def _mark_daily_played(self):
+        import datetime, json, os
+        today = datetime.date.today().isoformat()
+        key   = f"circuit-daily-{today}"
+        p     = self._data_path()
+        try:
+            d = json.loads(open(p).read()) if os.path.exists(p) else {}
+        except Exception:
+            d = {}
+        d.setdefault("daily_played", {})[key] = True
+        open(p, "w").write(json.dumps(d))
+
+    def _daily_seed(self):
+        import datetime, hashlib
+        today  = datetime.date.today().isoformat()
+        digest = int(hashlib.md5(f"circuit-{today}".encode()).hexdigest(), 16)
+        return digest % (2**31)
+
+    # ── Construcción de UI ────────────────────────────────────────
+    def _build_ui(self):
+        title = widgets.HTML(
+            "<div style='font-family:monospace;text-align:center;padding:10px 0 4px'>"
+            "<span style='font-size:22px;font-weight:bold;color:#1565c0'>🗺️ ¿EN QUÉ CIRCUITO?</span>"
+            "<br><span style='font-size:11px;color:#888'>"
+            "Pistas progresivas · Menos pistas = más puntos · 24 circuitos F1</span>"
+            "</div>"
+        )
+
+        self.btn_new   = widgets.Button(
+            description="🆕 Nuevo Circuito", button_style="primary",
+            layout=widgets.Layout(width="160px", height="38px"),
+        )
+        self.btn_daily = widgets.ToggleButton(
+            value=False, description="📅 Diario",
+            button_style="", layout=widgets.Layout(width="110px", height="38px"),
+        )
+        self.btn_pista = widgets.Button(
+            description="💡 Ver Pista", button_style="warning",
+            layout=widgets.Layout(width="120px", height="38px"),
+        )
+
+        self.stats_html = widgets.HTML(self._stats_markup())
+        self.pts_html   = widgets.HTML(self._pts_markup())
+
+        self.btn_new.on_click(lambda _: self._new_question())
+        self.btn_daily.observe(self._on_daily_toggle, names="value")
+        self.btn_pista.on_click(lambda _: self._ver_pista())
+
+        self.game_out = widgets.Output()
+
+        top_bar = widgets.HBox(
+            [self.btn_new, self.btn_daily, self.btn_pista,
+             self.stats_html, self.pts_html],
+            layout=widgets.Layout(gap="10px", align_items="center",
+                                  flex_flow="row wrap", margin="6px 0"),
+        )
+
+        self.main = widgets.VBox(
+            [title, top_bar, self.game_out],
+            layout=widgets.Layout(
+                padding="14px", border="2px solid #1565c0",
+                border_radius="10px", max_width="820px",
+            ),
+        )
+        display(self.main)
+        self._new_question()
+
+    def _pts_markup(self):
+        return (f"<span style='font-family:monospace;font-size:13px;color:#ffd700'>"
+                f"⭐ {self._score} pts</span>")
+
+    def _stats_markup(self):
+        pct = int(self._correct / self._total * 100) if self._total else 0
+        return (
+            f"<span style='font-family:monospace;font-size:12px;color:#aaa'>"
+            f"🔥 {self._streak} &nbsp;|&nbsp; "
+            f"✅ {self._correct}/{self._total} ({pct}%) &nbsp;|&nbsp;"
+            f" 🏅 {self._best_streak}</span>"
+        )
+
+    def _on_daily_toggle(self, change):
+        self.btn_daily.description  = "📅 Diario ON" if change["new"] else "📅 Diario"
+        self.btn_daily.button_style = "warning"      if change["new"] else ""
+        self.daily = change["new"]
+        self._new_question()
+
+    # ── Lógica de pregunta ────────────────────────────────────────
+    def _pick_circuit(self, seed=None):
+        import random
+        rng = random.Random(seed) if seed is not None else random
+
+        all_keys = list(F1_CIRCUITS.keys())
+
+        if seed is not None:
+            key = rng.choice(all_keys)
+        else:
+            available = [k for k in all_keys if k not in self._vistos]
+            if not available:
+                self._vistos = set()
+                available = all_keys
+            key = rng.choice(available)
+
+        self._vistos.add(key)
+
+        others     = [k for k in all_keys if k != key]
+        distractors = rng.sample(others, min(3, len(others)))
+        options     = [key] + distractors
+        rng.shuffle(options)
+        return key, options
+
+    def _new_question(self, b=None):
+        if self.daily:
+            if self._already_played_daily():
+                with self.game_out:
+                    clear_output(wait=True)
+                    display(widgets.HTML(
+                        "<div style='font-family:monospace;color:#ff9800;padding:12px;"
+                        "text-align:center;font-size:14px'>"
+                        "📅 Ya jugaste el circuito del día. ¡Volvé mañana!</div>"
+                    ))
+                return
+            seed = self._daily_seed()
+            self._circuit_key, self._options = self._pick_circuit(seed=seed)
+        else:
+            self._circuit_key, self._options = self._pick_circuit()
+
+        self._pistas_vistas = 1
+        self._answered      = False
+        self._render()
+
+    def _ver_pista(self):
+        if self._answered:
+            return
+        data  = F1_CIRCUITS[self._circuit_key]
+        total = len(data["caracteristicas"])
+        if self._pistas_vistas < total:
+            self._pistas_vistas += 1
+            self._render()
+
+    # ── Respuesta ─────────────────────────────────────────────────
+    def _answer(self, chosen_key):
+        if self._answered:
+            return
+        self._answered = True
+        self._total   += 1
+        correct = (chosen_key == self._circuit_key)
+
+        if correct:
+            self._correct += 1
+            self._streak  += 1
+            if self._streak > self._best_streak:
+                self._best_streak = self._streak
+            pts_idx = min(self._pistas_vistas - 1, len(self.PTS_PER_PISTA) - 1)
+            pts     = self.PTS_PER_PISTA[pts_idx]
+            if self._streak > 1:
+                bonus = min(self._streak - 1, 5) * 30
+                pts  += bonus
+            self._save_pts(pts)
+        else:
+            self._streak = 0
+            pts = 0
+            self._save_pts(0)
+
+        if self.daily:
+            self._mark_daily_played()
+
+        self.stats_html.value = self._stats_markup()
+        self.pts_html.value   = self._pts_markup()
+        self._render(result_pts=pts, result_correct=correct, chosen_key=chosen_key)
+
+    # ── Render ────────────────────────────────────────────────────
+    def _render(self, result_pts=None, result_correct=None, chosen_key=None):
+        data     = F1_CIRCUITS[self._circuit_key]
+        all_data = F1_CIRCUITS
+        parts    = []
+
+        # ── Pistas mostradas ──────────────────────────────────
+        pistas_html = ""
+        for i in range(self._pistas_vistas):
+            if i < len(data["caracteristicas"]):
+                pts_si = self.PTS_PER_PISTA[min(i, len(self.PTS_PER_PISTA) - 1)]
+                pts_label = (f"· <span style='color:#ffd700'>{pts_si} pts</span>"
+                             if not self._answered else "")
+                pistas_html += (
+                    f"<div style='background:#111;border-left:3px solid #1565c0;"
+                    f"border-radius:0 6px 6px 0;padding:8px 14px;margin:4px 0;"
+                    f"font-family:monospace;font-size:13px;color:#ddd'>"
+                    f"<span style='color:#555;font-size:10px'>PISTA {i+1} {pts_label}"
+                    f"</span><br>{data['caracteristicas'][i]}</div>"
+                )
+
+        total_pistas = len(data["caracteristicas"])
+        pts_ahora    = self.PTS_PER_PISTA[min(self._pistas_vistas - 1, len(self.PTS_PER_PISTA) - 1)]
+        pts_label_hdr = (f"&nbsp;·&nbsp; <span style='color:#ffd700'>+{pts_ahora} pts si acertás ahora</span>"
+                         if not self._answered else "")
+
+        header_txt = (
+            f"<div style='font-family:monospace;padding:8px 0'>"
+            f"<span style='color:#888;font-size:12px'>"
+            f"Pistas vistas: <b style='color:#fff'>{self._pistas_vistas}/{total_pistas}</b>"
+            f"{pts_label_hdr}</span></div>"
+            f"{pistas_html}"
+        )
+        parts.append(widgets.HTML(header_txt))
+
+        if not self._answered:
+            # ── Botones de opción ──────────────────────────────
+            btn_rows = []
+            row = []
+            for opt_key in self._options:
+                opt_data = all_data[opt_key]
+                flag     = self.FLAG_MAP.get(opt_data["pais"], "🏁")
+                btn = widgets.Button(
+                    description=f"{flag} {opt_data['display']}",
+                    layout=widgets.Layout(width="230px", height="46px"),
+                    style={"font_size": "13px", "font_weight": "bold"},
+                )
+                btn.on_click(lambda b, k=opt_key: self._answer(k))
+                row.append(btn)
+                if len(row) == 2:
+                    btn_rows.append(widgets.HBox(
+                        row, layout=widgets.Layout(gap="10px", margin="4px 0")))
+                    row = []
+            if row:
+                btn_rows.append(widgets.HBox(
+                    row, layout=widgets.Layout(gap="10px", margin="4px 0")))
+            parts.append(widgets.VBox(
+                btn_rows, layout=widgets.Layout(margin="10px 0 4px")))
+
+        else:
+            # ── Resultado ─────────────────────────────────────
+            bg     = "#0a2a0a" if result_correct else "#2a0a0a"
+            border = "#2e7d32" if result_correct else "#c62828"
+            color  = "#00c853" if result_correct else "#ef9a9a"
+            icon   = "✅"      if result_correct else "❌"
+            streak_bonus = (min(self._streak - 1, 5) * 30
+                            if result_correct and self._streak > 1 else 0)
+
+            if result_correct:
+                msg = (f"{icon} ¡CORRECTO! +{result_pts} pts"
+                       + (f" (racha ×{self._streak} +{streak_bonus})" if streak_bonus else ""))
+            else:
+                msg = f"{icon} INCORRECTO — Era <b style='color:#ffd700'>{data['display']}</b>"
+
+            # Opciones coloreadas
+            opts_html = "<div style='display:flex;flex-wrap:wrap;gap:8px;margin:10px 0'>"
+            for opt_key in self._options:
+                opt_d = all_data[opt_key]
+                flag  = self.FLAG_MAP.get(opt_d["pais"], "🏁")
+                if opt_key == self._circuit_key:
+                    c = "#00c853"; bc = "#2e7d32"; bg2 = "#0a2a0a"
+                elif opt_key == chosen_key and not result_correct:
+                    c = "#ef9a9a"; bc = "#c62828"; bg2 = "#2a0a0a"
+                else:
+                    c = "#555"; bc = "#333"; bg2 = "#0a0a0a"
+                opts_html += (
+                    f"<span style='background:{bg2};border:1px solid {bc};"
+                    f"border-radius:6px;padding:6px 14px;"
+                    f"font-family:monospace;font-size:13px;color:{c}'>"
+                    f"{flag} {opt_d['display']}</span>"
+                )
+            opts_html += "</div>"
+
+            win_str   = " · ".join(w.title() for w in data["ganadores"][:3])
+            info_html = (
+                f"<div style='font-size:11px;color:#666;margin-top:6px;font-family:monospace'>"
+                f"📍 {data['ciudad']}, {data['pais']} &nbsp;·&nbsp; "
+                f"📏 {data['longitud']} km &nbsp;·&nbsp; "
+                f"🏁 Primer GP: {data['primer_gp']}<br>"
+                f"🏆 Ganadores históricos: {win_str}<br>"
+                f"💬 Apodo: <i>{data.get('apodo', '')}</i>"
+                f"</div>"
+            )
+
+            # Todas las pistas reveladas
+            todas_pistas = ""
+            for i, pista in enumerate(data["caracteristicas"]):
+                op = "1" if i < self._pistas_vistas else "0.35"
+                todas_pistas += (
+                    f"<div style='opacity:{op};font-family:monospace;font-size:11px;"
+                    f"color:#aaa;padding:3px 8px;border-left:2px solid #333;margin:2px 0'>"
+                    f"Pista {i+1}: {pista}</div>"
+                )
+
+            parts.append(widgets.HTML(
+                f"<div style='background:{bg};border:2px solid {border};"
+                f"border-radius:8px;padding:12px 16px;font-family:monospace'>"
+                f"<div style='font-size:15px;color:{color};margin-bottom:6px'>{msg}</div>"
+                f"{opts_html}"
+                f"{info_html}"
+                f"</div>"
+                f"<div style='margin-top:10px'>"
+                f"<b style='font-family:monospace;font-size:12px;color:#555'>"
+                f"Todas las pistas:</b>{todas_pistas}</div>"
+            ))
+
+            btn_next = widgets.Button(
+                description="▶️ Siguiente Circuito",
+                button_style="primary",
+                layout=widgets.Layout(width="190px", height="38px", margin="10px 0 0"),
+            )
+            btn_next.on_click(lambda _: self._new_question())
+            parts.append(btn_next)
+
+        self.game_out.clear_output(wait=True)
+        with self.game_out:
+            display(widgets.VBox(parts))
