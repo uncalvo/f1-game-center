@@ -1493,750 +1493,10 @@ def normalize(s):
 # ══════════════════════════════════════════════════════════════════
 #  CLASE PRINCIPAL DEL JUEGO
 # ══════════════════════════════════════════════════════════════════
-class GridGame:
-    def __init__(self):
-        self.series_name   = "🏎️ Fórmula 1"
-        self.series        = SERIES_MAP["🏎️ Fórmula 1"]
-        self.difficulty    = "🟡 Medio"
-        self.cfg           = DIFFICULTY_CONFIG[self.difficulty]
-        self.row_cats      = []
-        self.col_cats      = []
-        self.inputs        = {}
-        self.grid_config   = {}
-        self.start_time    = None
-        self.timer_running = False
-        self.timer_thread  = None
-        self._current_color = "#e10600"
-        self.daily_mode       = False
-        self._pregen_result   = None   # pre-generated (row_cats, col_cats)
-        self._pregen_series   = None   # qué serie generó el pregen (para validar)
-        self._pregen_diff     = None   # qué dificultad generó el pregen
-        self._pregen_thread   = None
-        self.total_pts        = 0      # cumulative score across sessions
-        self._build_ui()
 
-    # ── UI ───────────────────────────────────────────────────────
-    def _build_ui(self):
-        self.output = widgets.Output()
-
-        # ── Selector de serie (F1 / F2) ──
-        self.series_toggle = widgets.ToggleButtons(
-            options=["🏎️ Fórmula 1", "🚀 Fórmula 2", "🔵 Fórmula 3", "🔀 Modo Mixto"],
-            value=self.series_name,
-            description='',
-            button_style='',
-            style={'button_width': '140px', 'font_weight': 'bold'},
-        )
-        self.series_toggle.observe(self._on_series_change, names='value')
-
-        series_label = widgets.HTML(
-            "<b style='font-size:13px'>Serie:</b>"
-        )
-
-        # ── Selector de dificultad ──
-        self.diff_selector = widgets.ToggleButtons(
-            options=list(DIFFICULTY_CONFIG.keys()),
-            value=self.difficulty,
-            description='',
-            style={'button_width': '128px'},
-            layout=widgets.Layout(margin='4px 0'),
-        )
-        self.diff_desc = widgets.HTML(
-            f"<i style='color:gray;font-size:12px'>{self.cfg['description']}</i>"
-        )
-        self.diff_selector.observe(self._on_difficulty_change, names='value')
-        diff_label = widgets.HTML("<b style='font-size:13px'>Dificultad:</b>")
-
-        # ── Botón nueva partida ──
-        self.btn_new = widgets.Button(
-            description="▶ Nueva Partida",
-            button_style='danger',
-            layout=widgets.Layout(width='155px', height='36px'),
-        )
-        self.btn_new.on_click(self._start_game)
-
-        # ── Timer y score ──
-        self.time_label = widgets.HTML(
-            "<span style='font-family:monospace;font-size:18px;font-weight:bold'>⏱ --:--</span>"
-        )
-        self.score_label = widgets.HTML(
-            "<span style='font-family:monospace;font-size:14px'>✅ 0/0</span>"
-        )
-
-        # ── Título dinámico ──
-        self.title_html = widgets.HTML(self._title_markup())
-
-        # ── Botones verificar / soluciones ──
-        self.btn_check = widgets.Button(
-            description="✔ Verificar", button_style='success',
-            layout=widgets.Layout(width='130px'), disabled=True,
-        )
-        self.btn_solutions = widgets.Button(
-            description="💡 Soluciones", button_style='info',
-            layout=widgets.Layout(width='130px'), disabled=True,
-        )
-        self.btn_history = widgets.Button(
-            description="📋 Historial", button_style='',
-            layout=widgets.Layout(width='120px'),
-        )
-        self.btn_check.on_click(self._check)
-        self.btn_solutions.on_click(self._show_solutions)
-        self.btn_history.on_click(self._show_history)
-
-        # ── Botón modo diario ──
-        self.daily_btn = widgets.ToggleButton(
-            value=False, description="📅 Diario OFF",
-            button_style='', layout=widgets.Layout(width='130px'),
-        )
-        self.daily_btn.observe(self._toggle_daily, names='value')
-        self.streak_label = widgets.HTML(
-            "<span style='font-family:monospace;font-size:13px'>🔥 0 días</span>"
-        )
-        self._refresh_streak_label()
-
-        self.btn_share = widgets.Button(
-            description="📤 Compartir", button_style='',
-            layout=widgets.Layout(width='120px'), disabled=True,
-        )
-        self.btn_share.on_click(self._share_result)
-
-        self.pts_label = widgets.HTML(
-            "<span style='font-family:monospace;font-size:13px'>⭐ 0 pts</span>"
-        )
-        self._refresh_pts_label()
-
-        self.grid_out = widgets.Output()
-
-        # ── Layout ──
-        top_bar = widgets.HBox([
-            widgets.VBox([self.title_html,
-                          series_label, self.series_toggle]),
-            widgets.VBox([diff_label, self.diff_selector, self.diff_desc]),
-        ], layout=widgets.Layout(justify_content='space-between',
-                                  align_items='flex-start', gap='20px'))
-
-        action_bar = widgets.HBox(
-            [self.btn_new, self.btn_check, self.btn_solutions, self.daily_btn,
-             self.btn_history, self.btn_share,
-             self.time_label, self.score_label, self.pts_label, self.streak_label],
-            layout=widgets.Layout(align_items='center', gap='8px', margin='8px 0',
-                                  flex_flow='row wrap'),
-        )
-
-        self.main_widget = widgets.VBox(
-            [top_bar, action_bar, self.grid_out, self.output],
-            layout=widgets.Layout(padding='14px', border='2px solid #e10600',
-                                   border_radius='10px', max_width='960px'),
-        )
-        display(self.main_widget)
-        # Kick off pre-generation immediately on load
-        self._start_pregen()
-
-    def _title_markup(self):
-        if "Fórmula 1" in self.series_name:
-            color, label, icon = "#e10600", "FÓRMULA 1", "🏎️"
-        elif "Fórmula 2" in self.series_name:
-            color, label, icon = "#1565c0", "FÓRMULA 2", "🚀"
-        elif "Fórmula 3" in self.series_name:
-            color, label, icon = "#2e7d32", "FÓRMULA 3", "🔵"
-        else:
-            color, label, icon = "#6a1b9a", "MODO MIXTO F1+F2+F3", "🔀"
-        self._current_color = color
-        subtitle = ("Equipos · Nac · Victorias · Podios · Campeón"
-                    if "Mixto" not in label
-                    else "Cruza F1+F2+F3 · Equipos · Academias · Multi-serie · Campeones")
-        return (
-            f"<h2 style='font-family:monospace;color:{color};margin:0'>"
-            f"{icon} {label} GRID CHALLENGE</h2>"
-            f"<p style='font-family:monospace;font-size:11px;color:#888;margin:2px 0 0'>"
-            f"{subtitle}</p>"
-        )
-
-    def _refresh_pts_label(self):
-        data = self._load_data()
-        pts  = data.get("total_pts", 0)
-        self.total_pts = pts
-        self.pts_label.value = (
-            f"<span style='font-family:monospace;font-size:13px'>⭐ {pts} pts</span>"
-        )
-
-    def _refresh_streak_label(self):
-        s = self._load_streak()
-        self.streak_label.value = (
-            f"<span style='font-family:monospace;font-size:13px'>"
-            f"🔥 {s['current']} días &nbsp; 🏅 {s['best']}</span>"
-        )
-
-    # ── Cambios de serie y dificultad ────────────────────────────
-    def _on_series_change(self, change):
-        self.series_name = change['new']
-        self.series      = SERIES_MAP[self.series_name]
-        self.title_html.value = self._title_markup()
-        self.main_widget.layout.border = f"2px solid {self._current_color}"
-        self._start_pregen()
-        with self.output:
-            clear_output()
-
-    def _on_difficulty_change(self, change):
-        self.difficulty = change['new']
-        self.cfg        = DIFFICULTY_CONFIG[self.difficulty]
-        self.diff_desc.value = f"<i style='color:gray;font-size:12px'>{self.cfg['description']}</i>"
-        # Restart pre-generation for new config
-        self._start_pregen()
-
-    # ── Pre-generación en hilo ───────────────────────────────────
-    def _start_pregen(self):
-        """Generate next grid in background so _start_game is instant."""
-        import threading as _threading
-        if self._pregen_thread and self._pregen_thread.is_alive():
-            return  # already running
-        self._pregen_result = None
-        cfg_snap     = DIFFICULTY_CONFIG[self.difficulty]
-        series_snap  = self.series
-
-        def _run():
-            try:
-                result = series_snap.generate_grid(cfg_snap)
-                self._pregen_result = result
-                self._pregen_series = series_snap
-                self._pregen_diff   = self.difficulty
-            except Exception:
-                self._pregen_result = None
-
-        t = _threading.Thread(target=_run, daemon=True)
-        t.start()
-        self._pregen_thread = t
-
-    # ── Iniciar partida ──────────────────────────────────────────
-    def _start_game(self, b=None):
-        self._stop_timer()
-        self.cfg = DIFFICULTY_CONFIG[self.difficulty]
-        self.btn_share.disabled = True
-        self._last_result = None  # reset share state
-
-        if self.daily_mode:
-            if self._already_played_today():
-                import datetime
-                with self.output:
-                    clear_output()
-                    print(f"🔒 Ya jugaste el grid del día de hoy")
-                    print(f"   {datetime.date.today().isoformat()} · {self.series_name} · {self.difficulty}")
-                    streak = self._load_streak()
-                    print(f"\n🔥 Racha: {streak['current']} días  |  🏅 Mejor: {streak['best']} días")
-                    print(f"\n¡Vuelve mañana para el siguiente grid!")
-                return
-            seed  = self._daily_seed()
-            state = random.getstate()
-            random.seed(seed)
-            self.row_cats, self.col_cats = self.series.generate_grid(self.cfg)
-            random.setstate(state)
-            import datetime
-            with self.output:
-                clear_output()
-                print(f"📅 Grid del día — {datetime.date.today().isoformat()}")
-                print(f"🔒 Misma semilla para todos · {self.series_name} · {self.difficulty}")
-        else:
-            # Usar pregen solo si corresponde a la serie y dificultad actuales
-            pregen_valido = (
-                self._pregen_result is not None and
-                self._pregen_series is self.series and
-                self._pregen_diff   == self.difficulty
-            )
-            if pregen_valido:
-                self.row_cats, self.col_cats = self._pregen_result
-                self._pregen_result = None
-            else:
-                self.row_cats, self.col_cats = self.series.generate_grid(self.cfg)
-            with self.output:
-                clear_output()
-
-        self._build_grid()
-        self._start_timer()
-        self.btn_check.disabled     = False
-        self.btn_solutions.disabled = False
-        # Pre-generate next grid in background
-        self._start_pregen()
-
-    # ── Construir grid ───────────────────────────────────────────
-    def _build_grid(self):
-        size   = self.cfg["grid_size"]
-        cell_w = '185px'
-        cell_h = '36px'
-        self.inputs      = {}
-        self.grid_config = {}
-
-        if "Fórmula 1" in self.series_name:
-            hdr_color_col, hdr_color_row = "#e10600", "#1565c0"
-        elif "Fórmula 2" in self.series_name:
-            hdr_color_col, hdr_color_row = "#1565c0", "#e10600"
-        elif "Fórmula 3" in self.series_name:
-            hdr_color_col, hdr_color_row = "#2e7d32", "#1b5e20"
-        else:  # Modo Mixto
-            hdr_color_col, hdr_color_row = "#6a1b9a", "#4a148c"
-
-        def hdr(label, color):
-            return widgets.HTML(
-                f"<div style='width:{cell_w};text-align:center;font-family:monospace;"
-                f"font-weight:bold;font-size:11px;color:{color};"
-                f"padding:4px 2px;line-height:1.3'>{label}</div>"
-            )
-
-        # Lista de nombres formateados para el Combobox (Title Case)
-        driver_options = sorted(
-            d.title() for d in self.series.all_drivers
-        )
-
-        top_row   = [widgets.HTML(f"<div style='width:{cell_w}'></div>")]
-        top_row  += [hdr(c["label"], hdr_color_col) for c in self.col_cats]
-        rows_w    = [widgets.HBox(top_row)]
-
-        for r in range(size):
-            row_w = [hdr(self.row_cats[r]["label"], hdr_color_row)]
-            for c in range(size):
-                cid = f"{r}-{c}"
-                self.grid_config[cid] = {
-                    "row_cat": self.row_cats[r],
-                    "col_cat": self.col_cats[c],
-                }
-                # Combobox: campo de texto con lista desplegable de sugerencias
-                combo = widgets.Combobox(
-                    placeholder="Escribe un piloto...",
-                    options=driver_options,
-                    ensure_option=False,
-                    layout=widgets.Layout(width=cell_w, height=cell_h),
-                )
-                # Live feedback: green if valid driver in DB, yellow if typing, grey if empty
-                def _on_change(change, _cid=cid):
-                    txt    = self.inputs[_cid]
-                    driver = normalize(change['new'])
-                    if driver == "":
-                        txt.layout.border = "2px solid #ccc"
-                    elif driver in self.series.drivers_meta:
-                        rc = self.grid_config[_cid]["row_cat"]
-                        cc = self.grid_config[_cid]["col_cat"]
-                        if rc["check"](driver) and cc["check"](driver):
-                            txt.layout.border = "3px solid #2e7d32"  # green = correct
-                        else:
-                            txt.layout.border = "3px solid #e10600"  # red = wrong cell
-                    else:
-                        txt.layout.border = "2px solid #f9a825"  # yellow = not in DB yet
-                combo.observe(_on_change, names='value')
-                self.inputs[cid] = combo
-                row_w.append(combo)
-            rows_w.append(widgets.HBox(row_w, layout=widgets.Layout(gap='4px')))
-
-        with self.grid_out:
-            clear_output(wait=True)
-            display(widgets.VBox(rows_w, layout=widgets.Layout(gap='4px')))
-
-        total = size * size
-        self.score_label.value = (
-            f"<span style='font-family:monospace;font-size:14px'>✅ 0/{total}</span>"
-        )
-
-    # ── Timer ─────────────────────────────────────────────────────
-    def _start_timer(self):
-        self.start_time    = time.time()
-        self.timer_running = True
-        limit = self.cfg.get("time_limit")
-
-        def run():
-            while self.timer_running:
-                elapsed = int(time.time() - self.start_time)
-                if limit:
-                    remaining = max(0, limit - elapsed)
-                    mm, ss    = divmod(remaining, 60)
-                    color     = "#e10600" if remaining <= 30 else "#333"
-                    self.time_label.value = (
-                        f"<span style='font-family:monospace;font-size:18px;"
-                        f"font-weight:bold;color:{color}'>⏱ {mm:02d}:{ss:02d}</span>"
-                    )
-                    if remaining == 0:
-                        self.timer_running = False
-                        with self.output:
-                            clear_output()
-                            print("⏰ ¡Tiempo agotado!")
-                        break
-                else:
-                    mm, ss = divmod(elapsed, 60)
-                    self.time_label.value = (
-                        f"<span style='font-family:monospace;font-size:18px;"
-                        f"font-weight:bold'>⏱ {mm:02d}:{ss:02d}</span>"
-                    )
-                time.sleep(1)
-
-        self.timer_thread = threading.Thread(target=run, daemon=True)
-        self.timer_thread.start()
-
-    def _stop_timer(self):
-        self.timer_running = False
-        if self.timer_thread:
-            self.timer_thread.join(timeout=1.5)
-
-    # ── Verificar ─────────────────────────────────────────────────
-    def _check(self, b):
-        size         = self.cfg["grid_size"]
-        allow_repeat = self.cfg.get("allow_repeat", False)
-        used         = set()
-        correct      = 0
-        total        = size * size
-        is_mixed     = isinstance(self.series, MixedSeries)
-
-        with self.output:
-            clear_output()
-            msgs = []
-
-            for r in range(size):
-                for c in range(size):
-                    cid    = f"{r}-{c}"
-                    txt    = self.inputs[cid]
-                    driver = normalize(txt.value)
-
-                    if driver == "":
-                        txt.layout.border = "2px solid #ccc"
-                        continue
-
-                    if driver not in self.series.drivers_meta:
-                        txt.layout.border = "3px solid #e10600"
-                        msgs.append(f"❌ '{txt.value}' no está en la base de datos")
-                        continue
-
-                    rc       = self.grid_config[cid]["row_cat"]
-                    cc       = self.grid_config[cid]["col_cat"]
-                    possible = self.series.drivers_satisfying(rc, cc)
-
-                    if driver in used and (not allow_repeat or len(possible) > 1):
-                        txt.layout.border = "3px solid orange"
-                        msgs.append(f"🔁 '{txt.value}' ya fue usado")
-                        continue
-
-                    if rc["check"](driver) and cc["check"](driver):
-                        txt.layout.border = "3px solid #2e7d32"
-                        used.add(driver)
-                        correct += 1
-                        if is_mixed:
-                            dm = self.series.drivers_meta[driver]
-                            msgs.append(f"✅ {txt.value.title()} | {dm['nationality']}")
-                        else:
-                            m = self.series.drivers_meta[driver]
-                            msgs.append(
-                                f"✅ {txt.value.title()} | {m['nationality']} | "
-                                f"{m['wins']}V {m['podiums']}P {'🏆' if m['champion'] else ''}"
-                            )
-                    else:
-                        txt.layout.border = "3px solid #e10600"
-                        msgs.append(
-                            f"❌ {txt.value} no cumple: [{rc['label']}] + [{cc['label']}]"
-                        )
-
-            self.score_label.value = (
-                f"<span style='font-family:monospace;font-size:14px'>"
-                f"✅ {correct}/{total}</span>"
-            )
-            for msg in msgs:
-                print(msg)
-
-            elapsed = int(time.time() - self.start_time) if self.start_time else 0
-            all_ok  = correct == total and not any(
-                m.startswith("❌") or m.startswith("🔁") for m in msgs
-            )
-
-            # Always record the attempt (even partial)
-            self._record_game(correct, total, elapsed, all_ok)
-
-            if all_ok:
-                self._stop_timer()
-                mm, ss = divmod(elapsed, 60)
-                diff_multiplier = {"🟢 Fácil": 1, "🟡 Medio": 2, "🔴 Difícil": 3, "💀 Experto": 5}
-                mult    = diff_multiplier.get(self.difficulty, 1)
-                base    = correct * 100 * mult
-                time_lim = self.cfg.get("time_limit")
-                bonus   = max(0, time_lim - elapsed) * 5 * mult if time_lim else 0
-                pts     = base + bonus
-                print(f"\n🏆 ¡GRID COMPLETO!  {self.series_name} · {self.difficulty}")
-                print(f"⏱ Tiempo: {mm:02d}:{ss:02d}  ·  ⭐ {pts} pts (×{mult} dificultad)")
-                if bonus > 0:
-                    print(f"   Bonus velocidad: +{bonus} pts")
-                if self.daily_mode:
-                    self._mark_daily_played()
-                    streak = self._save_streak(completed_today=True)
-                    self._refresh_streak_label()
-                    print(f"🔥 Racha: {streak['current']} días  |  🏅 Mejor: {streak['best']} días")
-                print(f"\n📤 Pulsa 'Compartir' para copiar tu resultado")
-
-    # ── Soluciones ────────────────────────────────────────────────
-    def _show_solutions(self, b):
-        size = self.cfg["grid_size"]
-        with self.output:
-            clear_output()
-            print("💡 Soluciones posibles:\n")
-            for r in range(size):
-                for c in range(size):
-                    rc  = self.row_cats[r]
-                    cc  = self.col_cats[c]
-                    sol = sorted(self.series.drivers_satisfying(rc, cc))
-                    print(f"  [{rc['label']}]  ✕  [{cc['label']}]:")
-                    print("    " + " | ".join(d.title() for d in sol))
-                    print()
-
-    # ── Modo diario ──────────────────────────────────────────────
-    def _toggle_daily(self, change):
-        self.daily_mode = change['new']
-        self.daily_btn.description = "📅 Diario ON" if self.daily_mode else "📅 Diario OFF"
-        self.daily_btn.button_style = 'warning' if self.daily_mode else ''
-        with self.output:
-            clear_output()
-            if self.daily_mode:
-                import datetime
-                today  = datetime.date.today().isoformat()
-                data   = self._load_data()
-                streak = data.get("streak", {"current": 0, "best": 0, "last_date": ""})
-                played = self._already_played_today()
-                print(f"📅 Modo Diario activado — {today}")
-                print(f"🔥 Racha actual: {streak['current']} días  |  🏅 Mejor racha: {streak['best']} días")
-                if played:
-                    print(f"✅ Ya jugaste el diario de hoy ({self.series_name} · {self.difficulty}). ¡Vuelve mañana!")
-                else:
-                    print(f"⚠️  Pulsa 'Nueva Partida' para el grid del día ({self.series_name} · {self.difficulty})")
-
-    # ── Persistencia unificada ────────────────────────────────────
-    def _data_path(self):
-        import os
-        return os.path.expanduser('~/.f1grid_data.json')
-
-    def _load_data(self):
-        import json, os
-        try:
-            p = self._data_path()
-            if os.path.exists(p):
-                with open(p) as f:
-                    return json.load(f)
-        except Exception:
-            pass
-        return {
-            "streak":  {"current": 0, "best": 0, "last_date": ""},
-            "history": [],          # list of game records
-            "daily_played": {},     # {"YYYY-MM-DD|serie|diff": bool}
-        }
-
-    def _save_data(self, data):
-        import json
-        try:
-            with open(self._data_path(), 'w') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
-
-    def _load_streak(self):
-        return self._load_data().get("streak", {"current": 0, "best": 0, "last_date": ""})
-
-    def _already_played_today(self):
-        import datetime
-        today = datetime.date.today().isoformat()
-        key   = f"{today}|{self.series_name}|{self.difficulty}"
-        data  = self._load_data()
-        return data.get("daily_played", {}).get(key, False)
-
-    def _mark_daily_played(self):
-        import datetime
-        today = datetime.date.today().isoformat()
-        key   = f"{today}|{self.series_name}|{self.difficulty}"
-        data  = self._load_data()
-        data.setdefault("daily_played", {})[key] = True
-        self._save_data(data)
-
-    def _save_streak(self, completed_today):
-        import datetime
-        data      = self._load_data()
-        streak    = data.get("streak", {"current": 0, "best": 0, "last_date": ""})
-        today     = datetime.date.today().isoformat()
-        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
-        if completed_today:
-            if streak["last_date"] == today:
-                pass
-            elif streak["last_date"] == yesterday:
-                streak["current"] += 1
-                streak["best"] = max(streak["best"], streak["current"])
-                streak["last_date"] = today
-            else:
-                streak["current"] = 1
-                streak["best"] = max(streak["best"], 1)
-                streak["last_date"] = today
-        data["streak"] = streak
-        self._save_data(data)
-        return streak
-
-    def _record_game(self, correct, total, elapsed, completed):
-        """Save a game result to history and update cumulative score."""
-        import datetime
-        data = self._load_data()
-
-        # Score calculation
-        diff_multiplier = {"🟢 Fácil": 1, "🟡 Medio": 2, "🔴 Difícil": 3, "💀 Experto": 5}
-        mult     = diff_multiplier.get(self.difficulty, 1)
-        base_pts = correct * 100 * mult
-        time_lim = self.cfg.get("time_limit")
-        bonus    = max(0, time_lim - elapsed) * 5 * mult if time_lim and completed else 0
-        pts_this = base_pts + bonus
-
-        # Add to cumulative
-        data["total_pts"] = data.get("total_pts", 0) + pts_this
-
-        record = {
-            "date":       datetime.date.today().isoformat(),
-            "serie":      self.series_name,
-            "difficulty": self.difficulty,
-            "correct":    correct,
-            "total":      total,
-            "elapsed":    elapsed,
-            "completed":  completed,
-            "daily":      self.daily_mode,
-            "pts":        pts_this,
-        }
-        data.setdefault("history", []).append(record)
-        if len(data["history"]) > 200:
-            data["history"] = data["history"][-200:]
-        self._save_data(data)
-        self._refresh_pts_label()
-
-        # Store for share button
-        self._last_result = record
-        if completed:
-            self.btn_share.disabled = False
-
-    def _daily_seed(self):
-        import datetime, hashlib
-        today  = datetime.date.today().isoformat()
-        key    = f"{today}-{self.series_name}-{self.difficulty}"
-        digest = int(hashlib.md5(key.encode()).hexdigest(), 16)
-        return digest % (2**31)
-
-    # ── Compartir resultado ───────────────────────────────────────
-    def _share_result(self, b=None):
-        r = getattr(self, '_last_result', None)
-        if not r:
-            return
-        import datetime
-        mm, ss = divmod(r.get('elapsed', 0), 60)
-        tiempo = f"{mm:02d}:{ss:02d}"
-        diff   = r['difficulty'].split(' ')[1] if ' ' in r['difficulty'] else r['difficulty']
-        serie  = r['serie'].split(' ')[1] if ' ' in r['serie'] else r['serie']
-        daily  = "📅 Diario · " if r.get('daily') else ""
-        size   = self.cfg['grid_size']
-
-        # Emoji grid — squares showing correct/wrong without spoiling answers
-        rows = self.row_cats
-        cols = self.col_cats
-        grid_emoji = ""
-        for ri in range(size):
-            for ci in range(size):
-                cid    = f"{ri}-{ci}"
-                inp    = self.inputs.get(cid)
-                if inp:
-                    driver = normalize(inp.value)
-                    rc     = self.grid_config[cid]["row_cat"]
-                    cc     = self.grid_config[cid]["col_cat"]
-                    if driver and driver in self.series.drivers_meta and rc["check"](driver) and cc["check"](driver):
-                        grid_emoji += "🟩"
-                    elif driver:
-                        grid_emoji += "🟥"
-                    else:
-                        grid_emoji += "⬜"
-            grid_emoji += "\n"
-
-        text = (
-            f"🏁 F1/F2/F3 Grid Challenge\n"
-            f"{daily}{serie} · {diff} · {r['correct']}/{r['total']} ✅\n"
-            f"⏱ {tiempo}  ⭐ {r.get('pts', 0)} pts\n"
-            f"{r['date']}\n\n"
-            f"{grid_emoji.rstrip()}"
-        )
-
-        with self.output:
-            clear_output()
-            print("📤 Copia este texto para compartir tu resultado:\n")
-            print("─" * 40)
-            print(text)
-            print("─" * 40)
-            print("\n(Selecciona el texto de arriba y cópialo con Ctrl+C)")
-
-    # ── Historial ─────────────────────────────────────────────────
-    def _show_history(self, b=None):
-        data    = self._load_data()
-        history = data.get("history", [])
-        streak  = data.get("streak",  {"current": 0, "best": 0, "last_date": ""})
-        total_pts = data.get("total_pts", 0)
-        with self.output:
-            clear_output()
-            if not history:
-                print("📋 Aún no hay partidas registradas. ¡Juega una partida primero!")
-                return
-
-            print("━" * 54)
-            print(f"  📋  HISTORIAL DE PARTIDAS")
-            print("━" * 54)
-
-            total_games     = len(history)
-            completed_games = sum(1 for g in history if g.get("completed"))
-            pct             = completed_games / total_games * 100 if total_games else 0
-            avg_time_compl  = (
-                sum(g["elapsed"] for g in history if g.get("completed") and g.get("elapsed",0) > 0)
-                / max(completed_games, 1)
-            )
-            am, as_  = divmod(int(avg_time_compl), 60)
-
-            print(f"  Partidas jugadas   : {total_games}")
-            print(f"  Grids completados  : {completed_games}  ({pct:.0f}%)")
-            print(f"  Tiempo medio       : {am:02d}:{as_:02d}  (partidas completadas)")
-            print(f"  ⭐ Puntuación total : {total_pts} pts")
-            print(f"  🔥 Racha actual    : {streak['current']} días")
-            print(f"  🏅 Mejor racha     : {streak['best']} días")
-            print()
-
-            print("  Por serie:")
-            for sname in ["🏎️ Fórmula 1", "🚀 Fórmula 2", "🔵 Fórmula 3", "🔀 Modo Mixto"]:
-                sg = [g for g in history if g.get("serie") == sname]
-                if sg:
-                    sc  = sum(1 for g in sg if g.get("completed"))
-                    sp  = sum(g.get("pts",0) for g in sg)
-                    sn  = sname.split(' ')[1] if ' ' in sname else sname
-                    print(f"    {sn}: {len(sg)} partidas, {sc} completadas ({sc/len(sg)*100:.0f}%) — {sp} pts")
-
-            print()
-            print("  Por dificultad:")
-            for diff in ["🟢 Fácil", "🟡 Medio", "🔴 Difícil", "💀 Experto"]:
-                dg = [g for g in history if g.get("difficulty") == diff]
-                if dg:
-                    dc = sum(1 for g in dg if g.get("completed"))
-                    dp = sum(g.get("pts",0) for g in dg)
-                    dn = diff.split(' ')[1] if ' ' in diff else diff
-                    print(f"    {dn}: {len(dg)} partidas, {dc} completadas ({dc/len(dg)*100:.0f}%) — {dp} pts")
-
-            print()
-            print("  Últimas 10 partidas:")
-            print(f"  {'Fecha':<12} {'Serie':<10} {'Dif':<10} {'Res':<8} {'Tiempo':<8} {'Pts'}")
-            print("  " + "─" * 58)
-            for g in reversed(history[-10:]):
-                mm, ss  = divmod(g.get("elapsed", 0), 60)
-                tiempo  = f"{mm:02d}:{ss:02d}" if g.get("elapsed") else "--:--"
-                result  = f"✅ {g['correct']}/{g['total']}" if g.get("completed") else f"  {g.get('correct',0)}/{g.get('total',0)}"
-                daily_m = "📅" if g.get("daily") else "  "
-                sn      = g.get('serie','?').split(' ')[1] if ' ' in g.get('serie','') else g.get('serie','?')[:6]
-                dn      = g.get('difficulty','?').split(' ')[1] if ' ' in g.get('difficulty','') else g.get('difficulty','?')[:6]
-                pts_g   = g.get('pts', 0)
-                print(f"  {g.get('date','?'):<12} {daily_m}{sn:<9} {dn:<10} {result:<8} {tiempo:<8} {pts_g}")
-            print("━" * 54)
-
-
-
-
-
-
-# ══════════════════════════════════════════════════════════════════
-#  BASE DE DATOS — RESULTADOS DE GP
-# ══════════════════════════════════════════════════════════════════
 GP_RESULTS = {
-    1950: {
+    # ── Años 50 ───────────────────────────────────────────────────
+     1950: {
         "Gran Premio de Gran Bretaña": ["giuseppe farina","luigi fagioli","reg parnell","yves giraud cabantous","louis rosier","bob gerard","cuth harrison","philippe etancelin","peter walker","joe kelly"],
         "Gran Premio de Mónaco": ["juan manuel fangio","alberto ascari","louis chiron","luigi villoresi","raymond sommer","philippe etancelin","peter whitehead","peter walker","bob gerard","louis rosier"],
         "Gran Premio de Indianápolis": ["johnnie parsons","bill holland","mauri rose","troy ruttman","duane carter","paul russo","jim rathmann","eddie sack","bill cantrell","johnny mantz"],
@@ -4215,6 +3475,660 @@ ALL_CONSTRUCTORS = sorted(RAW_CONSTRUCTORS.keys())
 # ══════════════════════════════════════════════════════════════════
 #  MODO 2 — PODIUM CHALLENGE: Adivina el top 10
 # ══════════════════════════════════════════════════════════════════
+
+RAW_CONSTRUCTORS = {
+    "ferrari": {
+        "nac": "italiana", "epocas": [1950,1960,1970,1980,1990,2000,2010,2020],
+        "motores": ["ferrari"],
+        "titles": 16, "wins": 243,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","barcelona","bahrain","abu dhabi","budapest","melbourne","shanghai","interlagos","mexico","baku","singapore","zandvoort","imola","portimao","jeddah","montreal","hockenheim","nurburgring","austria","istanbul","valencia"],
+        "pilotos_campeon": ["juan manuel fangio","mike hawthorn","phil hill","john surtees","niki lauda","jody scheckter","michael schumacher","kimi raikkonen"],
+    },
+    "mercedes": {
+        "nac": "alemana", "epocas": [1950,2010,2020],
+        "motores": ["mercedes"],
+        "titles": 8, "wins": 125,
+        "circuitos_victoria": ["monaco","silverstone","spa","suzuka","barcelona","bahrain","abu dhabi","budapest","melbourne","shanghai","interlagos","mexico","baku","singapore","zandvoort","imola","portimao","jeddah","montreal","austria","istanbul","nurburgring","sochi","mugello","istanbul","eifel","70th anniversary","styria","sakhir","bahrain","las vegas","qatar"],
+        "pilotos_campeon": ["lewis hamilton","nico rosberg"],
+    },
+    "red bull": {
+        "nac": "austriaca", "epocas": [2000,2010,2020],
+        "motores": ["renault","honda","rbpt"],
+        "titles": 7, "wins": 120,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","barcelona","bahrain","abu dhabi","budapest","melbourne","shanghai","interlagos","mexico","baku","singapore","zandvoort","imola","portimao","jeddah","montreal","austria","istanbul","nurburgring","malaysia","china","japan","qatar","las vegas"],
+        "pilotos_campeon": ["sebastian vettel","max verstappen"],
+    },
+    "mclaren": {
+        "nac": "británica", "epocas": [1960,1970,1980,1990,2000,2010,2020],
+        "motores": ["ford","cosworth","chevrolet","ford","tag","honda","ford","mercedes","renault","mercedes","mercedes"],
+        "titles": 8, "wins": 183,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","barcelona","bahrain","abu dhabi","budapest","melbourne","shanghai","interlagos","mexico","baku","singapore","canada","austria","malaysia","japan","san marino","imola","portimao","jeddah","las vegas","miami","zandvoort","qatar","sao paulo","saudi arabia","australia"],
+        "pilotos_campeon": ["emerson fittipaldi","james hunt","niki lauda","alain prost","ayrton senna","mika hakkinen","lewis hamilton"],
+    },
+    "williams": {
+        "nac": "británica", "epocas": [1970,1980,1990,2000,2010,2020],
+        "motores": ["ford","cosworth","ford","toyota","renault","bmw","toyota","renault","mercedes","mercedes"],
+        "titles": 9, "wins": 114,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","barcelona","bahrain","abu dhabi","budapest","melbourne","interlagos","canada","austria","japan","san marino","imola","nurburgring","hockenheim","portugal","france","brazil"],
+        "pilotos_campeon": ["alan jones","keke rosberg","nelson piquet","nigel mansell","alain prost","damon hill","jacques villeneuve"],
+    },
+    "renault": {
+        "nac": "francesa", "epocas": [1970,1980,2000,2010,2020],
+        "motores": ["renault"],
+        "titles": 2, "wins": 35,
+        "circuitos_victoria": ["monaco","spa","suzuka","barcelona","bahrain","budapest","malaysia","japan","san marino","imola","nurburgring","hockenheim","austria","france","australia","canada","malaysia","bahrain","china","turkey","singapore","australia"],
+        "pilotos_campeon": ["fernando alonso"],
+    },
+    "alpine": {
+        "nac": "francesa", "epocas": [2020],
+        "motores": ["renault"],
+        "titles": 0, "wins": 1,
+        "circuitos_victoria": ["hungary"],
+        "pilotos_campeon": [],
+    },
+    "lotus": {
+        "nac": "británica", "epocas": [1950,1960,1970,1980],
+        "motores": ["climax","ford","cosworth","renault"],
+        "titles": 7, "wins": 79,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","france","germany","netherlands","south africa","canada","austria","argentina","brazil","usa","portugal"],
+        "pilotos_campeon": ["jim clark","jochen rindt","emerson fittipaldi","mario andretti"],
+    },
+    "brabham": {
+        "nac": "británica", "epocas": [1960,1970,1980],
+        "motores": ["climax","repco","ford","alfa romeo","cosworth","bmw"],
+        "titles": 4, "wins": 35,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","netherlands","south africa","canada","austria","argentina"],
+        "pilotos_campeon": ["jack brabham","denny hulme","nelson piquet"],
+    },
+    "tyrrell": {
+        "nac": "británica", "epocas": [1960,1970,1980,1990],
+        "motores": ["ford","cosworth","renault","yamaha"],
+        "titles": 3, "wins": 23,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","netherlands","south africa","canada","austria","argentina","usa"],
+        "pilotos_campeon": ["jackie stewart"],
+    },
+    "benetton": {
+        "nac": "británica", "epocas": [1980,1990,2000],
+        "motores": ["bmw","ford","cosworth","renault","playlife"],
+        "titles": 2, "wins": 27,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","suzuka","barcelona","hungary","japan","portugal","australia","canada","belgium","france","germany","san marino"],
+        "pilotos_campeon": ["michael schumacher"],
+    },
+    "alfa romeo": {
+        "nac": "italiana", "epocas": [1950,2010,2020],
+        "motores": ["alfa romeo","ferrari"],
+        "titles": 2, "wins": 11,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","switzerland","belgium"],
+        "pilotos_campeon": ["giuseppe farina","juan manuel fangio"],
+    },
+    "cooper": {
+        "nac": "británica", "epocas": [1950,1960],
+        "motores": ["climax","maserati"],
+        "titles": 2, "wins": 16,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","netherlands","south africa","usa","argentina"],
+        "pilotos_campeon": ["jack brabham","bruce mclaren"],
+    },
+    "brm": {
+        "nac": "británica", "epocas": [1950,1960,1970],
+        "motores": ["brm"],
+        "titles": 1, "wins": 17,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","netherlands","south africa","usa"],
+        "pilotos_campeon": ["graham hill"],
+    },
+    "matra": {
+        "nac": "francesa", "epocas": [1960,1970],
+        "motores": ["ford","cosworth","matra"],
+        "titles": 1, "wins": 9,
+        "circuitos_victoria": ["monaco","monza","silverstone","spa","france","germany","netherlands","south africa","usa","canada"],
+        "pilotos_campeon": ["jackie stewart"],
+    },
+    "march": {
+        "nac": "británica", "epocas": [1970,1980],
+        "motores": ["ford","cosworth","alfa romeo"],
+        "titles": 0, "wins": 3,
+        "circuitos_victoria": ["silvertone","france","sweden"],
+        "pilotos_campeon": [],
+    },
+    "hesketh": {
+        "nac": "británica", "epocas": [1970],
+        "motores": ["ford","cosworth"],
+        "titles": 0, "wins": 1,
+        "circuitos_victoria": ["netherlands"],
+        "pilotos_campeon": [],
+    },
+    "wolf": {
+        "nac": "canadiense", "epocas": [1970],
+        "motores": ["ford","cosworth"],
+        "titles": 0, "wins": 3,
+        "circuitos_victoria": ["argentina","monaco","canada"],
+        "pilotos_campeon": [],
+    },
+    "shadow": {
+        "nac": "estadounidense", "epocas": [1970],
+        "motores": ["ford","cosworth"],
+        "titles": 0, "wins": 1,
+        "circuitos_victoria": ["austria"],
+        "pilotos_campeon": [],
+    },
+    "ligier": {
+        "nac": "francesa", "epocas": [1970,1980,1990],
+        "motores": ["matra","ford","cosworth","renault","lamborghini","mugen"],
+        "titles": 0, "wins": 9,
+        "circuitos_victoria": ["sweden","argentina","brazil","spain","long beach","monaco","austria","canada","netherlands"],
+        "pilotos_campeon": [],
+    },
+    "arrows": {
+        "nac": "británica", "epocas": [1970,1980,1990,2000],
+        "motores": ["ford","cosworth","bmw","megatron","ford","hart","yamaha","arrows","supertec","asiatech"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "minardi": {
+        "nac": "italiana", "epocas": [1980,1990,2000],
+        "motores": ["ford","motori moderni","lamborghini","ferrari","ford","cosworth","asiatech"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "jordan": {
+        "nac": "irlandesa", "epocas": [1990,2000],
+        "motores": ["ford","cosworth","yamaha","peugeot","mugen","honda","ford","bridgestone"],
+        "titles": 0, "wins": 4,
+        "circuitos_victoria": ["spa","monza","nurburgring","brazil","hungary"],
+        "pilotos_campeon": [],
+    },
+    "sauber": {
+        "nac": "suiza", "epocas": [1990,2000,2010,2020],
+        "motores": ["ilmor","mercedes","petronas","ferrari","bmw","ferrari","honda","ferrari"],
+        "titles": 0, "wins": 1,
+        "circuitos_victoria": ["canada"],
+        "pilotos_campeon": [],
+    },
+    "bar": {
+        "nac": "británica", "epocas": [1990,2000],
+        "motores": ["supertec","honda"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "honda": {
+        "nac": "japonesa", "epocas": [1960,2000],
+        "motores": ["honda"],
+        "titles": 0, "wins": 3,
+        "circuitos_victoria": ["mexico","italy","hungary"],
+        "pilotos_campeon": [],
+    },
+    "brawn gp": {
+        "nac": "británica", "epocas": [2000],
+        "motores": ["mercedes"],
+        "titles": 1, "wins": 8,
+        "circuitos_victoria": ["bahrain","australia","monaco","turkey","silverstone","valencia","brazil","japan"],
+        "pilotos_campeon": ["jenson button"],
+    },
+    "force india": {
+        "nac": "india", "epocas": [2000,2010],
+        "motores": ["ferrari","mercedes"],
+        "titles": 0, "wins": 3,
+        "circuitos_victoria": ["spa","bahrain","monza"],
+        "pilotos_campeon": [],
+    },
+    "racing point": {
+        "nac": "británica", "epocas": [2010,2020],
+        "motores": ["mercedes"],
+        "titles": 0, "wins": 1,
+        "circuitos_victoria": ["sakhir"],
+        "pilotos_campeon": [],
+    },
+    "aston martin": {
+        "nac": "británica", "epocas": [2020],
+        "motores": ["mercedes"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "haas": {
+        "nac": "estadounidense", "epocas": [2010,2020],
+        "motores": ["ferrari"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "toro rosso": {
+        "nac": "italiana", "epocas": [2000,2010],
+        "motores": ["cosworth","ferrari","renault","honda"],
+        "titles": 0, "wins": 1,
+        "circuitos_victoria": ["monza"],
+        "pilotos_campeon": [],
+    },
+    "alphatauri": {
+        "nac": "italiana", "epocas": [2010,2020],
+        "motores": ["honda","renault"],
+        "titles": 0, "wins": 2,
+        "circuitos_victoria": ["monza","bahrain"],
+        "pilotos_campeon": [],
+    },
+    "rb": {
+        "nac": "italiana", "epocas": [2020],
+        "motores": ["honda"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "toyota": {
+        "nac": "japonesa", "epocas": [2000,2010],
+        "motores": ["toyota"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "bmw sauber": {
+        "nac": "alemana", "epocas": [2000],
+        "motores": ["bmw"],
+        "titles": 0, "wins": 1,
+        "circuitos_victoria": ["canada"],
+        "pilotos_campeon": [],
+    },
+    "super aguri": {
+        "nac": "japonesa", "epocas": [2000],
+        "motores": ["honda"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "virgin": {
+        "nac": "británica", "epocas": [2010],
+        "motores": ["cosworth"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "hrt": {
+        "nac": "española", "epocas": [2010],
+        "motores": ["cosworth"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "caterham": {
+        "nac": "británica", "epocas": [2010],
+        "motores": ["renault"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "marussia": {
+        "nac": "británica", "epocas": [2010],
+        "motores": ["cosworth","ferrari"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "maserati": {
+        "nac": "italiana", "epocas": [1950],
+        "motores": ["maserati"],
+        "titles": 1, "wins": 9,
+        "circuitos_victoria": ["argentina","belgium","france","germany","monaco","italy","pescara","morocco"],
+        "pilotos_campeon": ["juan manuel fangio"],
+    },
+    "vanwall": {
+        "nac": "británica", "epocas": [1950],
+        "motores": ["vanwall"],
+        "titles": 1, "wins": 9,
+        "circuitos_victoria": ["silverstone","aintree","pescara","monza","spa","nurburgring","casablanca","morocco","france"],
+        "pilotos_campeon": [],
+    },
+    "lancia": {
+        "nac": "italiana", "epocas": [1950],
+        "motores": ["lancia"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "benetton ford": {
+        "nac": "británica", "epocas": [1990],
+        "motores": ["ford"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "stewart": {
+        "nac": "británica", "epocas": [1990],
+        "motores": ["ford"],
+        "titles": 0, "wins": 1,
+        "circuitos_victoria": ["monaco"],
+        "pilotos_campeon": [],
+    },
+    "prost": {
+        "nac": "francesa", "epocas": [1990,2000],
+        "motores": ["mugen","peugeot","ferrari"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "techeetah": {
+        "nac": "francesa", "epocas": [2010,2020],
+        "motores": ["renault"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "williams bmw": {
+        "nac": "británica", "epocas": [2000],
+        "motores": ["bmw"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "kick sauber": {
+        "nac": "suiza", "epocas": [2020],
+        "motores": ["ferrari"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    # ── Equipos históricos adicionales ───────────────────────────
+    "eagle": {
+        "nac": "estadounidense", "epocas": [1960],
+        "motores": ["climax","weslake"],
+        "titles": 0, "wins": 1,
+        "circuitos_victoria": ["spa"],
+        "pilotos_campeon": [],
+    },
+    "honda ra272": {
+        "nac": "japonesa", "epocas": [1960],
+        "motores": ["honda"],
+        "titles": 0, "wins": 1,
+        "circuitos_victoria": ["mexico"],
+        "pilotos_campeon": [],
+    },
+    "parnelli": {
+        "nac": "estadounidense", "epocas": [1970],
+        "motores": ["ford","cosworth"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "ensign": {
+        "nac": "británica", "epocas": [1970,1980],
+        "motores": ["ford","cosworth"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "fittipaldi": {
+        "nac": "brasileña", "epocas": [1970,1980],
+        "motores": ["ford","cosworth"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "osella": {
+        "nac": "italiana", "epocas": [1980],
+        "motores": ["ford","cosworth","alfa romeo"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "ats": {
+        "nac": "alemana", "epocas": [1970,1980],
+        "motores": ["ford","cosworth","bmw"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "lola": {
+        "nac": "británica", "epocas": [1960,1970,1980,1990],
+        "motores": ["climax","ford","cosworth","lamborghini","ferrari","ford"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "pacific": {
+        "nac": "británica", "epocas": [1990],
+        "motores": ["ford","cosworth","ilmor"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "simtek": {
+        "nac": "británica", "epocas": [1990],
+        "motores": ["ford","cosworth"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "footwork": {
+        "nac": "británica", "epocas": [1990],
+        "motores": ["ford","cosworth","hart","yamaha"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "dallara": {
+        "nac": "italiana", "epocas": [1990],
+        "motores": ["ford","cosworth"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "spyker": {
+        "nac": "neerlandesa", "epocas": [2000],
+        "motores": ["ferrari","honda"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "midland": {
+        "nac": "británica", "epocas": [2000],
+        "motores": ["toyota"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "aguri": {
+        "nac": "japonesa", "epocas": [2000],
+        "motores": ["honda"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+    "manor": {
+        "nac": "británica", "epocas": [2010],
+        "motores": ["ferrari","mercedes"],
+        "titles": 0, "wins": 0,
+        "circuitos_victoria": [],
+        "pilotos_campeon": [],
+    },
+}
+
+def _build_constructor_categories():
+    """Genera todas las categorías jugables para el Constructor Challenge."""
+    cats = []
+
+    NAC_FLAGS = {
+        "italiana":"🇮🇹","alemana":"🇩🇪","británica":"🇬🇧","francesa":"🇫🇷",
+        "austriaca":"🇦🇹","japonesa":"🇯🇵","estadounidense":"🇺🇸","suiza":"🇨🇭",
+        "india":"🇮🇳","irlandesa":"🇮🇪","canadiense":"🇨🇦","española":"🇪🇸",
+        "brasileña":"🇧🇷","neerlandesa":"🇳🇱",
+    }
+    MOTOR_FLAGS = {
+        "ferrari":"🔴","mercedes":"⭐","renault":"🟡","honda":"🔵",
+        "ford":"🔧","cosworth":"🔩","bmw":"⚪","tag":"🏷️",
+    }
+
+    # 1. Nacionalidad
+    nacs = set(v["nac"] for v in RAW_CONSTRUCTORS.values())
+    for nac in sorted(nacs):
+        flag = NAC_FLAGS.get(nac, "🏁")
+        teams = [t for t, v in RAW_CONSTRUCTORS.items() if v["nac"] == nac]
+        if len(teams) >= 1:
+            cats.append({
+                "key":   f"nac:{nac}",
+                "label": f"{flag} {nac.capitalize()}",
+                "check": lambda t, _n=nac: RAW_CONSTRUCTORS[t]["nac"] == _n,
+                "teams": teams,
+            })
+
+    # 2. Época
+    EPOCAS = {
+        1950: "Años 50s", 1960: "Años 60s", 1970: "Años 70s",
+        1980: "Años 80s", 1990: "Años 90s", 2000: "Años 2000s",
+        2010: "Años 2010s", 2020: "Años 2020s",
+    }
+    for dec, lbl in EPOCAS.items():
+        teams = [t for t, v in RAW_CONSTRUCTORS.items() if dec in v["epocas"]]
+        if len(teams) >= 1:
+            cats.append({
+                "key":   f"epoca:{dec}",
+                "label": f"🗓️ {lbl}",
+                "check": lambda t, _d=dec: _d in RAW_CONSTRUCTORS[t]["epocas"],
+                "teams": teams,
+            })
+
+    # 3. Motor
+    all_motors = set(m for v in RAW_CONSTRUCTORS.values() for m in v["motores"])
+    for motor in sorted(all_motors):
+        teams = [t for t, v in RAW_CONSTRUCTORS.items() if motor in v["motores"]]
+        if len(teams) >= 2:
+            flag = MOTOR_FLAGS.get(motor, "⚙️")
+            cats.append({
+                "key":   f"motor:{motor}",
+                "label": f"{flag} Motor {motor.capitalize()}",
+                "check": lambda t, _m=motor: _m in RAW_CONSTRUCTORS[t]["motores"],
+                "teams": teams,
+            })
+
+    # 4. Logros
+    cats.append({
+        "key": "logro:campeon", "label": "👑 Ganó Campeonato",
+        "check": lambda t: RAW_CONSTRUCTORS[t]["titles"] >= 1,
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["titles"] >= 1],
+    })
+    cats.append({
+        "key": "logro:5titles", "label": "👑👑 ≥5 Campeonatos",
+        "check": lambda t: RAW_CONSTRUCTORS[t]["titles"] >= 5,
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["titles"] >= 5],
+    })
+    cats.append({
+        "key": "logro:wins1", "label": "🏆 Al menos 1 victoria",
+        "check": lambda t: RAW_CONSTRUCTORS[t]["wins"] >= 1,
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["wins"] >= 1],
+    })
+    cats.append({
+        "key": "logro:wins10", "label": "🏆🏆 ≥10 victorias",
+        "check": lambda t: RAW_CONSTRUCTORS[t]["wins"] >= 10,
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["wins"] >= 10],
+    })
+    cats.append({
+        "key": "logro:wins50", "label": "🏆🏆🏆 ≥50 victorias",
+        "check": lambda t: RAW_CONSTRUCTORS[t]["wins"] >= 50,
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["wins"] >= 50],
+    })
+    cats.append({
+        "key": "logro:monaco", "label": "🎰 Ganó en Mónaco",
+        "check": lambda t: "monaco" in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if "monaco" in v["circuitos_victoria"]],
+    })
+    cats.append({
+        "key": "logro:monza", "label": "🇮🇹 Ganó en Monza",
+        "check": lambda t: "monza" in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if "monza" in v["circuitos_victoria"]],
+    })
+    cats.append({
+        "key": "logro:silverstone", "label": "🇬🇧 Ganó en Silverstone",
+        "check": lambda t: "silverstone" in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if "silverstone" in v["circuitos_victoria"]],
+    })
+    cats.append({
+        "key": "logro:spa", "label": "🇧🇪 Ganó en Spa",
+        "check": lambda t: "spa" in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if "spa" in v["circuitos_victoria"]],
+    })
+    cats.append({
+        "key": "logro:suzuka", "label": "🇯🇵 Ganó en Suzuka",
+        "check": lambda t: "suzuka" in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if "suzuka" in v["circuitos_victoria"]],
+    })
+    cats.append({
+        "key": "logro:campeon_piloto", "label": "🌟 Tuvo piloto campeón",
+        "check": lambda t: len(RAW_CONSTRUCTORS[t]["pilotos_campeon"]) >= 1,
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if len(v["pilotos_campeon"]) >= 1],
+    })
+    cats.append({
+        "key": "logro:nocampeon", "label": "❌ Nunca ganó campeonato",
+        "check": lambda t: RAW_CONSTRUCTORS[t]["titles"] == 0,
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["titles"] == 0],
+    })
+    cats.append({
+        "key": "logro:novictoria", "label": "❌ Nunca ganó una carrera",
+        "check": lambda t: RAW_CONSTRUCTORS[t]["wins"] == 0,
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if v["wins"] == 0],
+    })
+
+    # 5. Circuitos adicionales
+    CIRC_EXTRA = [
+        ("interlagos",   "🇧🇷 Ganó en Interlagos"),
+        ("barcelona",    "🇪🇸 Ganó en Barcelona"),
+        ("nurburgring",  "🇩🇪 Ganó en Nürburgring"),
+        ("hungaroring",  "🇭🇺 Ganó en Hungaroring"),
+        ("melbourne",    "🇦🇺 Ganó en Melbourne"),
+        ("abu dhabi",    "🇦🇪 Ganó en Abu Dhabi"),
+        ("montreal",     "🇨🇦 Ganó en Montreal"),
+        ("zandvoort",    "🇳🇱 Ganó en Zandvoort"),
+    ]
+    for circ, lbl in CIRC_EXTRA:
+        teams = [t for t, v in RAW_CONSTRUCTORS.items() if circ in v["circuitos_victoria"]]
+        if len(teams) >= 2:
+            cats.append({
+                "key":   f"logro:{circ}",
+                "label": lbl,
+                "check": lambda t, _c=circ: _c in RAW_CONSTRUCTORS[t]["circuitos_victoria"],
+                "teams": teams,
+            })
+
+    # 6. Pilotos campeones múltiples
+    cats.append({
+        "key": "logro:2campeon_pilotos", "label": "🌟🌟 ≥2 pilotos campeones",
+        "check": lambda t: len(RAW_CONSTRUCTORS[t]["pilotos_campeon"]) >= 2,
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items() if len(v["pilotos_campeon"]) >= 2],
+    })
+
+    # 7. Nunca ganó pero corrió ≥5 temporadas
+    cats.append({
+        "key": "logro:never_won_veteran", "label": "🏁 Sin victorias con historia",
+        "check": lambda t: RAW_CONSTRUCTORS[t]["wins"] == 0 and sum(1 for d in RAW_CONSTRUCTORS[t]["epocas"]) >= 2,
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items()
+                  if v["wins"] == 0 and len(v["epocas"]) >= 2],
+    })
+
+    # 8. Usó motor propio (nombre del equipo == motor)
+    MOTORES_PROPIOS = ["ferrari", "honda", "renault", "alfa romeo", "mercedes", "maserati", "bmw"]
+    cats.append({
+        "key": "logro:motor_propio", "label": "⚙️ Usó motor propio",
+        "check": lambda t: any(m == t.split()[0] for m in RAW_CONSTRUCTORS[t]["motores"]),
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items()
+                  if any(m == t.split()[0] for m in v["motores"])],
+    })
+
+    # 9. Equipo que ganó su primera temporada
+    cats.append({
+        "key": "logro:one_season_win", "label": "⚡ Ganó en su primera época",
+        "check": lambda t: (RAW_CONSTRUCTORS[t]["wins"] >= 1
+                            and len(RAW_CONSTRUCTORS[t]["epocas"]) == 1),
+        "teams": [t for t, v in RAW_CONSTRUCTORS.items()
+                  if v["wins"] >= 1 and len(v["epocas"]) == 1],
+    })
+
+    return cats
+
+CONSTRUCTOR_CATS = _build_constructor_categories()
+ALL_CONSTRUCTORS = sorted(RAW_CONSTRUCTORS.keys())
+
+
+# ══════════════════════════════════════════════════════════════════
+#  MODO 2 — PODIUM CHALLENGE: Adivina el top 10
+# ══════════════════════════════════════════════════════════════════
 class PodiumGame:
     def __init__(self):
         self._build_ui()
@@ -4620,644 +4534,7 @@ class PodiumGame:
 # ══════════════════════════════════════════════════════════════════
 #  MODO 4 — CONSTRUCTOR CHALLENGE: Adivina la escudería
 # ══════════════════════════════════════════════════════════════════
-class ConstructorGame:
-    GRID_SIZE = 3
-    COLORS = {
-        "col":    "#1565c0",  # azul para columnas
-        "row":    "#b71c1c",  # rojo para filas
-        "cell_empty":   "#1a1a1a",
-        "cell_correct": "#0a2a0a",
-        "cell_wrong":   "#2a0a0a",
-        "border": "#333",
-        "gold":   "#ffd700",
-        "green":  "#00c853",
-        "red":    "#e10600",
-        "gray":   "#888",
-    }
 
-    def __init__(self):
-        self._score       = 0
-        self._attempts    = {}   # (r,c) -> intentos restantes
-        self._solved      = {}   # (r,c) -> True/False
-        self._grid_cats   = []   # [[col_cats], [row_cats]]
-        self._answers     = {}   # (r,c) -> set of valid teams
-        self._sel         = {}   # widgets dropdown por celda
-        self._cell_out    = {}   # widgets Output por celda
-        self._build_ui()
-
-    # ─── Generación de grilla ────────────────────────────────────
-    def _pick_categories(self):
-        """Elige 3 cols y 3 filas garantizando al menos 1 respuesta por celda."""
-        import random
-        for attempt in range(500):
-            cols = random.sample(CONSTRUCTOR_CATS, self.GRID_SIZE)
-            rows = random.sample([c for c in CONSTRUCTOR_CATS if c not in cols], self.GRID_SIZE)
-            valid = True
-            answers = {}
-            for r, rcat in enumerate(rows):
-                for c, ccat in enumerate(cols):
-                    sol = [t for t in ALL_CONSTRUCTORS
-                           if ccat["check"](t) and rcat["check"](t)]
-                    if len(sol) == 0:
-                        valid = False
-                        break
-                    answers[(r, c)] = set(sol)
-                if not valid:
-                    break
-            if valid:
-                return cols, rows, answers
-        return None, None, None
-
-    # ─── UI ──────────────────────────────────────────────────────
-    def _build_ui(self):
-        C = self.COLORS
-
-        self.header_html  = widgets.HTML("")
-        self.msg_html     = widgets.HTML("")
-
-        # Botón nueva partida
-        self.btn_new = widgets.Button(
-            description="🔄 Nueva Grilla",
-            layout=widgets.Layout(width="160px", height="36px"),
-            style={"button_color": "#1a3a6a", "font_weight": "bold"},
-        )
-        self.btn_new.on_click(lambda _: self._new_game())
-
-        self.grid_out = widgets.Output()
-
-        self.main = widgets.VBox(
-            [self.header_html,
-             widgets.HBox([self.btn_new],
-                          layout=widgets.Layout(justify_content="center", margin="6px 0")),
-             self.msg_html,
-             self.grid_out],
-            layout=widgets.Layout(max_width="760px", margin="0 auto"),
-        )
-        display(self.main)
-        self._new_game()
-
-    def _refresh_header(self):
-        solved  = sum(1 for v in self._solved.values() if v)
-        total   = self.GRID_SIZE * self.GRID_SIZE
-        pct     = int(solved / total * 100)
-        C       = self.COLORS
-        self.header_html.value = (
-            f"<div style='font-family:monospace;text-align:center;padding:8px 0'>"
-            f"<span style='font-size:22px;font-weight:bold;color:{C['red']}'>🏗️ CONSTRUCTOR CHALLENGE</span>"
-            f"<br><span style='font-size:11px;color:{C['gray']}'>"
-            f"Encontrá la escudería que cumple AMBAS condiciones</span>"
-            f"<br><div style='margin-top:6px'>"
-            f"<span style='color:{C['gold']};font-size:14px'>✅ Resueltas: <b>{solved}/{total}</b></span>"
-            f"&nbsp;&nbsp;"
-            f"<span style='color:#aaa;font-size:14px'>⭐ Puntos: <b>{self._score}</b></span>"
-            f"</div></div>"
-        )
-
-    def _new_game(self):
-        self._score    = 0
-        self._solved   = {}
-        self._attempts = {}
-        self._sel      = {}
-        self._cell_out = {}
-
-        cols, rows, answers = self._pick_categories()
-        if cols is None:
-            self.msg_html.value = "<div style='color:red'>Error generando grilla. Intentá de nuevo.</div>"
-            return
-
-        self._col_cats  = cols
-        self._row_cats  = rows
-        self._answers   = answers
-
-        for r in range(self.GRID_SIZE):
-            for c in range(self.GRID_SIZE):
-                self._attempts[(r, c)] = 3
-                self._solved[(r, c)]   = False
-
-        self._refresh_header()
-        self.msg_html.value = ""
-        self._render_grid()
-
-    def _render_grid(self):
-        C    = self.COLORS
-        SIZE = self.GRID_SIZE
-
-        with self.grid_out:
-            clear_output(wait=True)
-
-            # Opciones para dropdowns: todos los constructores
-            self._opts = ["— elegir —"] + [t.title() for t in ALL_CONSTRUCTORS]
-            opts = self._opts
-
-            rows_widgets = []
-
-            # ── Fila de encabezados de columna ──
-            header_cells = [widgets.HTML("<div style='width:160px'></div>")]
-            for c, ccat in enumerate(self._col_cats):
-                header_cells.append(widgets.HTML(
-                    f"<div style='width:155px;text-align:center;font-family:monospace;"
-                    f"font-size:12px;font-weight:bold;color:white;"
-                    f"background:{C['col']};border-radius:8px;padding:8px 4px;"
-                    f"margin:2px'>{ccat['label']}</div>"
-                ))
-            rows_widgets.append(widgets.HBox(header_cells,
-                layout=widgets.Layout(gap="4px", align_items="center")))
-
-            # ── Filas de juego ──
-            for r, rcat in enumerate(self._row_cats):
-                row_cells = []
-
-                # Etiqueta de fila
-                row_cells.append(widgets.HTML(
-                    f"<div style='width:155px;text-align:center;font-family:monospace;"
-                    f"font-size:12px;font-weight:bold;color:white;"
-                    f"background:{C['row']};border-radius:8px;padding:8px 4px;"
-                    f"margin:2px'>{rcat['label']}</div>"
-                ))
-
-                for c in range(SIZE):
-                    cell_out = widgets.Output(
-                        layout=widgets.Layout(width="158px", height="130px")
-                    )
-                    self._cell_out[(r, c)] = cell_out
-                    self._render_cell(r, c)
-                    row_cells.append(cell_out)
-
-                rows_widgets.append(widgets.HBox(row_cells,
-                    layout=widgets.Layout(gap="4px", align_items="center")))
-
-            display(widgets.VBox(rows_widgets, layout=widgets.Layout(gap="4px")))
-
-    def _render_cell(self, r, c):
-        C       = self.COLORS
-        solved  = self._solved[(r, c)]
-        tries   = self._attempts[(r, c)]
-
-        with self._cell_out[(r, c)]:
-            clear_output(wait=True)
-
-            if solved:
-                # Mostrar respuesta correcta
-                team   = self._sel.get((r, c), "?")
-                bg_ok  = C["cell_correct"]
-                gr_ok  = C["green"]
-                gr_dim = "#555"
-                display(widgets.HTML(
-                    f"<div style='background:{bg_ok};border:2px solid {gr_ok};"
-                    f"border-radius:10px;width:150px;height:122px;"
-                    f"display:flex;flex-direction:column;align-items:center;"
-                    f"justify-content:center;font-family:monospace'>"
-                    f"<div style='font-size:22px'>✅</div>"
-                    f"<div style='font-size:12px;font-weight:bold;color:{gr_ok};"
-                    f"text-align:center;padding:4px'>{team.title()}</div>"
-                    f"<div style='font-size:10px;color:{gr_dim}'>{tries} intento(s) usados</div>"
-                    f"</div>"
-                ))
-                return
-
-            if tries == 0:
-                # Agotado — mostrar solución
-                sols   = ", ".join(t.title() for t in sorted(self._answers[(r, c)])[:3])
-                bg_bad = C["cell_wrong"]
-                rd     = C["red"]
-                display(widgets.HTML(
-                    f"<div style='background:{bg_bad};border:2px solid {rd};"
-                    f"border-radius:10px;width:150px;height:122px;"
-                    f"display:flex;flex-direction:column;align-items:center;"
-                    f"justify-content:center;font-family:monospace;padding:4px'>"
-                    f"<div style='font-size:18px'>❌</div>"
-                    f"<div style='font-size:9px;color:{rd};text-align:center'>"
-                    f"Podía ser:<br>{sols}</div>"
-                    f"</div>"
-                ))
-                return
-
-            # ── Dropdown + botón confirmar ──
-            dd = widgets.Dropdown(
-                options=self._opts,
-                value="— elegir —",
-                layout=widgets.Layout(width="150px"),
-            )
-            # Guardar referencia al último dropdown seleccionado
-            self._sel[(r, c)] = "— elegir —"
-
-            def on_dd_change(change, _r=r, _c=c):
-                self._sel[(_r, _c)] = change["new"]
-            dd.observe(on_dd_change, names="value")
-
-            btn = widgets.Button(
-                description="✔ Confirmar",
-                layout=widgets.Layout(width="150px", height="28px"),
-                style={"button_color": "#1a3a6a", "font_weight": "bold"},
-            )
-
-            gray     = C["gray"]
-            dots_ok  = "🟡" * tries
-            dots_bad = "⚫" * (3 - tries)
-            tries_html = widgets.HTML(
-                f"<div style='font-size:10px;color:{gray};font-family:monospace;"
-                f"text-align:center'>{dots_ok}{dots_bad} {tries} int.</div>"
-            )
-
-            btn.on_click(lambda _, _r=r, _c=c: self._submit((_r, _c)))
-
-            display(widgets.VBox(
-                [dd, btn, tries_html],
-                layout=widgets.Layout(
-                    background=C["cell_empty"],
-                    border=f"2px solid {C['border']}",
-                    border_radius="10px",
-                    padding="6px",
-                    width="150px",
-                    align_items="center",
-                    gap="4px",
-                )
-            ))
-
-    def _submit(self, key):
-        r, c    = key
-        chosen  = self._sel.get(key, "— elegir —")
-        if chosen == "— elegir —":
-            return
-
-        chosen_norm = chosen.lower().strip()
-        correct     = chosen_norm in self._answers[key]
-
-        if correct:
-            self._solved[key] = True
-            pts = 30 * self._attempts[key]   # más puntos por menos intentos
-            self._score += pts
-            self._refresh_header()
-
-            # Guardar nombre usado
-            self._sel[key] = chosen_norm
-            self._render_cell(r, c)
-
-            # Mensaje si ganó todo
-            if all(self._solved.values()):
-                self.msg_html.value = (
-                    f"<div style='text-align:center;font-family:monospace;"
-                    f"font-size:18px;color:#ffd700;padding:10px'>"
-                    f"🏆 ¡GRILLA COMPLETA! Puntuación final: {self._score} pts</div>"
-                )
-        else:
-            self._attempts[key] -= 1
-            self._render_cell(r, c)
-            if self._attempts[key] == 0:
-                rd2 = self.COLORS["red"]
-                self.msg_html.value = (
-                    f"<div style='text-align:center;font-family:monospace;"
-                    f"font-size:13px;color:{rd2};padding:4px'>"
-                    f"❌ Sin intentos en esa celda</div>"
-                )
-
-# ══════════════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════════════
-#  MODO 3 — DUELO DE PILOTOS: ¿Quién tiene más?
-# ══════════════════════════════════════════════════════════════════
-class DuelGame:
-    STATS = ["wins", "podiums", "champion"]
-    STAT_LABELS = {
-        "wins":     ("🏆 VICTORIAS",   "victorias"),
-        "podiums":  ("🥇 PODIOS",      "podios"),
-        "champion": ("👑 CAMPEONATOS", "campeonatos"),
-    }
-    COLORS = {
-        "bg":    "#0d0d0d", "card":  "#1a1a1a", "border": "#333333",
-        "red":   "#e10600", "gold":  "#ffd700", "green":  "#00c853",
-        "gray":  "#888888", "white": "#f0f0f0",
-    }
-
-    def __init__(self):
-        self.f1 = SERIES_F1
-        self._build_driver_pool()
-        self._streak = 0
-        self._best   = 0
-        self._total  = 0
-        self._state  = "playing"
-        self._current_stat = "wins"
-        self._driver_a = self._driver_b = None
-        self._val_a    = self._val_b    = None
-        self._build_ui()
-
-    def _build_driver_pool(self):
-        self.pool_star = [
-            d for d, m in self.f1.drivers_meta.items()
-            if m["podiums"] >= 1
-        ]
-        self.pool_all = list(self.f1.drivers_meta.keys())
-
-    def _get_stat_value(self, driver, stat):
-        m = self.f1.drivers_meta[driver]
-        if stat == "wins":    return m["wins"]
-        if stat == "podiums": return m["podiums"]
-        if stat == "champion":
-            c = m["champion"]
-            if isinstance(c, bool): return 1 if c else 0
-            if isinstance(c, int):  return c
-            return 0
-        return 0
-
-    def _pick_pair(self, stat):
-        import random
-        pool = self.pool_star if len(self.pool_star) >= 10 else self.pool_all
-        for _ in range(300):
-            a, b = random.sample(pool, 2)
-            va, vb = self._get_stat_value(a, stat), self._get_stat_value(b, stat)
-            if va == vb:
-                continue
-            # Para victorias: evitar duelos contra alguien con 0
-            if stat == "wins" and min(va, vb) == 0 and max(va, vb) > 15:
-                continue
-            return a, b, va, vb
-        # Fallback sin filtro
-        a, b = random.sample(pool, 2)
-        while self._get_stat_value(a, stat) == self._get_stat_value(b, stat):
-            b = random.choice(pool)
-        return a, b, self._get_stat_value(a, stat), self._get_stat_value(b, stat)
-
-    def _fmt_name(self, d):
-        return d.title()
-
-    def _fmt_flag(self, d):
-        FLAGS = {
-            "española":"🇪🇸","británica":"🇬🇧","alemana":"🇩🇪","finlandesa":"🇫🇮",
-            "australiana":"🇦🇺","brasileña":"🇧🇷","mexicana":"🇲🇽","francesa":"🇫🇷",
-            "monegasca":"🇲🇨","neerlandesa":"🇳🇱","tailandesa":"🇹🇭","argentina":"🇦🇷",
-            "canadiense":"🇨🇦","rusa":"🇷🇺","italiana":"🇮🇹","japonesa":"🇯🇵",
-            "austriaca":"🇦🇹","colombiana":"🇨🇴","venezolana":"🇻🇪","polaca":"🇵🇱",
-            "danesa":"🇩🇰","neozelandesa":"🇳🇿","sueca":"🇸🇪","sudafricana":"🇿🇦",
-            "estadounidense":"🇺🇸","suiza":"🇨🇭","india":"🇮🇳","portuguesa":"🇵🇹",
-            "húngara":"🇭🇺","belga":"🇧🇪","irlandesa":"🇮🇪","china":"🇨🇳",
-            "noruega":"🇳🇴","estonia":"🇪🇪","singapurense":"🇸🇬","turca":"🇹🇷",
-        }
-        nat = self.f1.drivers_meta[d]["nationality"]
-        return FLAGS.get(nat, "🏁")
-
-    def _card_html(self, driver, revealed=False, val=None, winner=False, loser=False):
-        C       = self.COLORS
-        name    = self._fmt_name(driver)
-        flag    = self._fmt_flag(driver)
-        nat     = self.f1.drivers_meta[driver]["nationality"].capitalize()
-        teams   = self.f1.drivers_meta[driver]["teams"]
-        team_str = ", ".join(t.title() for t in teams[:2])
-        if len(teams) > 2: team_str += " ..."
-
-        border = C["green"] if winner else (C["red"] if loser else C["border"])
-        bg     = "#0a2a0a"  if winner else ("#2a0a0a" if loser else C["card"])
-
-        if revealed and val is not None:
-            stat_word = self.STAT_LABELS[self._current_stat][1]
-            num_color = C["gold"] if winner else (C["gray"] if loser else C["white"])
-            stat_html = (
-                f"<div style='font-size:40px;font-weight:bold;color:{num_color};"
-                f"margin:10px 0 2px 0'>{val}</div>"
-                f"<div style='font-size:10px;color:{C['gray']};text-transform:uppercase;"
-                f"letter-spacing:2px'>{stat_word}</div>"
-            )
-        else:
-            stat_html = (
-                f"<div style='font-size:40px;font-weight:bold;color:{C['gray']};"
-                f"margin:10px 0 2px 0'>?</div>"
-                f"<div style='font-size:10px;color:{C['gray']};text-transform:uppercase;"
-                f"letter-spacing:2px'>{self.STAT_LABELS[self._current_stat][1]}</div>"
-            )
-
-        return (
-            f"<div style='background:{bg};border:2px solid {border};border-radius:12px;"
-            f"padding:22px 18px;text-align:center;min-width:190px;max-width:230px'>"
-            f"<div style='font-size:34px'>{flag}</div>"
-            f"<div style='font-size:17px;font-weight:bold;color:{C['white']};"
-            f"margin:6px 0 2px 0;font-family:monospace'>{name}</div>"
-            f"<div style='font-size:10px;color:{C['gray']};margin-bottom:6px'>{nat}</div>"
-            f"<div style='font-size:9px;color:#555;margin-bottom:10px'>{team_str}</div>"
-            f"{stat_html}"
-            f"</div>"
-        )
-
-    def _refresh_header(self):
-        C = self.COLORS
-        self.header_html.value = (
-            f"<div style='font-family:monospace;text-align:center;padding:8px 0'>"
-            f"<span style='font-size:22px;font-weight:bold;color:{C['red']}'>⚔️ DUELO DE PILOTOS</span>"
-            f"<br><span style='font-size:11px;color:{C['gray']}'>F1 · Racha infinita · Victorias / Podios / Campeonatos</span>"
-            f"<br><div style='margin-top:8px'>"
-            f"<span style='color:{C['gold']};font-size:14px'>🔥 Racha: <b>{self._streak}</b></span>"
-            f"&nbsp;&nbsp;&nbsp;"
-            f"<span style='color:{C['gray']};font-size:14px'>🏅 Mejor: <b>{self._best}</b></span>"
-            f"&nbsp;&nbsp;&nbsp;"
-            f"<span style='color:#aaa;font-size:14px'>⭐ Pts: <b>{self._total}</b></span>"
-            f"</div></div>"
-        )
-
-    def _build_ui(self):
-        import random
-        C = self.COLORS
-
-        self.header_html   = widgets.HTML("")
-        self.question_html = widgets.HTML("")
-        self.card_a        = widgets.HTML("")
-        self.card_b        = widgets.HTML("")
-        self.feedback_html = widgets.HTML("")
-        self._refresh_header()
-
-        # Botones de elección
-        self.btn_a = widgets.Button(
-            description="◀  IZQUIERDA",
-            layout=widgets.Layout(width="175px", height="44px"),
-            style={"button_color": "#1e3a5f", "font_weight": "bold"},
-        )
-        self.btn_b = widgets.Button(
-            description="DERECHA  ▶",
-            layout=widgets.Layout(width="175px", height="44px"),
-            style={"button_color": "#1e3a5f", "font_weight": "bold"},
-        )
-        self.btn_next = widgets.Button(
-            description="➡ SIGUIENTE",
-            layout=widgets.Layout(width="155px", height="40px", display="none"),
-            style={"button_color": "#004d00", "font_weight": "bold"},
-        )
-        self.btn_restart = widgets.Button(
-            description="🔄 NUEVA PARTIDA",
-            layout=widgets.Layout(width="175px", height="40px", display="none"),
-            style={"button_color": "#4a0000", "font_weight": "bold"},
-        )
-
-        self.btn_a.on_click(lambda _: self._answer("a"))
-        self.btn_b.on_click(lambda _: self._answer("b"))
-        self.btn_next.on_click(lambda _: self._next_round())
-        self.btn_restart.on_click(lambda _: self._restart())
-
-        self.btn_daily = widgets.ToggleButton(
-            value=False, description="📅 Duelo del Día",
-            layout=widgets.Layout(width="155px", height="40px"),
-            button_style="",
-        )
-        self.btn_daily.observe(self._on_daily_toggle, names="value")
-
-        vs_label = widgets.HTML(
-            "<div style='width:36px;text-align:center;font-size:20px;"
-            "color:#444;padding-top:56px'>VS</div>"
-        )
-        cards_row  = widgets.HBox(
-            [self.card_a, vs_label, self.card_b],
-            layout=widgets.Layout(justify_content="center", align_items="flex-start", gap="6px"),
-        )
-        btns_row   = widgets.HBox(
-            [self.btn_a, self.btn_b],
-            layout=widgets.Layout(justify_content="center", gap="18px", margin="10px 0 4px 0"),
-        )
-        action_row = widgets.HBox(
-            [self.btn_daily, self.btn_next, self.btn_restart],
-            layout=widgets.Layout(justify_content="center", gap="12px"),
-        )
-
-        self.main = widgets.VBox(
-            [self.header_html, self.question_html, cards_row,
-             btns_row, self.feedback_html, action_row],
-            layout=widgets.Layout(max_width="560px", margin="0 auto"),
-        )
-        display(self.main)
-        self._next_round()
-
-    def _on_daily_toggle(self, change):
-        self.btn_daily.description  = "📅 Duelo ON" if change["new"] else "📅 Duelo del Día"
-        self.btn_daily.button_style = "warning"     if change["new"] else ""
-        self._restart()
-
-    def _daily_seed_duel(self):
-        import hashlib, datetime
-        today  = datetime.date.today().isoformat()
-        return int(hashlib.md5(f"duel-{today}".encode()).hexdigest(), 16) % (2**31)
-
-    def _already_played_duel(self):
-        import datetime, json, pathlib
-        today = datetime.date.today().isoformat()
-        key   = f"duel-daily-{today}"
-        try:
-            data = json.loads(pathlib.Path("~/.f1grid_data.json").expanduser().read_text())
-            return data.get("daily_played", {}).get(key, False)
-        except Exception:
-            return False
-
-    def _mark_duel_played(self):
-        import datetime, json, pathlib
-        today = datetime.date.today().isoformat()
-        key   = f"duel-daily-{today}"
-        p     = pathlib.Path("~/.f1grid_data.json").expanduser()
-        try:
-            data = json.loads(p.read_text()) if p.exists() else {}
-        except Exception:
-            data = {}
-        data.setdefault("daily_played", {})[key] = True
-        p.write_text(json.dumps(data))
-
-    def _next_round(self):
-        import random
-        if getattr(self, 'btn_daily', None) and self.btn_daily.value:
-            # Modo diario: secuencia fija por fecha basada en ronda actual
-            rng = random.Random(self._daily_seed_duel() + self._streak)
-            stats_order = [self.STATS[rng.randint(0, len(self.STATS)-1)]]
-            self._current_stat = stats_order[0]
-            pool = sorted(self.pool_star)
-            for _ in range(300):
-                a, b = rng.sample(pool, 2)
-                va, vb = self._get_stat_value(a, self._current_stat), self._get_stat_value(b, self._current_stat)
-                if va != vb:
-                    break
-        else:
-            self._current_stat = random.choice(self.STATS)
-            a, b, va, vb       = self._pick_pair(self._current_stat)
-
-        self._driver_a, self._driver_b = a, b
-        self._val_a,    self._val_b    = va, vb
-        self._state = "playing"
-
-        stat_word = self.STAT_LABELS[self._current_stat][1]
-        self.question_html.value = (
-            f"<div style='font-family:monospace;text-align:center;padding:8px 0 12px 0'>"
-            f"<span style='font-size:14px;color:#bbb'>¿Quién tiene más </span>"
-            f"<span style='font-size:15px;font-weight:bold;color:#ffd700'>{stat_word.upper()}</span>"
-            f"<span style='font-size:14px;color:#bbb'> en F1?</span>"
-            f"</div>"
-        )
-
-        self.card_a.value      = self._card_html(a)
-        self.card_b.value      = self._card_html(b)
-        self.feedback_html.value = ""
-
-        self.btn_a.disabled              = False
-        self.btn_b.disabled              = False
-        self.btn_a.layout.display        = ""
-        self.btn_b.layout.display        = ""
-        self.btn_next.layout.display     = "none"
-        self.btn_restart.layout.display  = "none"
-
-    def _answer(self, chosen):
-        if self._state != "playing":
-            return
-        self._state = "revealed"
-        self.btn_a.disabled = True
-        self.btn_b.disabled = True
-
-        a, b   = self._driver_a, self._driver_b
-        va, vb = self._val_a,    self._val_b
-        correct_side = "a" if va > vb else "b"
-        correct      = chosen == correct_side
-
-        # Revelar cartas
-        self.card_a.value = self._card_html(a, revealed=True, val=va,
-                                             winner=(va>vb), loser=(va<vb))
-        self.card_b.value = self._card_html(b, revealed=True, val=vb,
-                                             winner=(vb>va), loser=(vb<va))
-
-        if correct:
-            self._streak += 1
-            if self._streak > self._best:
-                self._best = self._streak
-            pts = 10 + (self._streak - 1) * 5
-            self._total += pts
-            self._refresh_header()
-            self.feedback_html.value = (
-                f"<div style='text-align:center;font-family:monospace;padding:8px'>"
-                f"<span style='font-size:20px;color:#00c853;font-weight:bold'>"
-                f"✅ ¡CORRECTO!  +{pts} pts</span>"
-                f"<span style='font-size:12px;color:#666;display:block;margin-top:2px'>"
-                f"Racha actual: {self._streak}</span>"
-                f"</div>"
-            )
-            self.btn_next.layout.display    = ""
-            self.btn_restart.layout.display = ""
-        else:
-            self._streak = 0
-            self._refresh_header()
-            if getattr(self, 'btn_daily', None) and self.btn_daily.value:
-                self._mark_duel_played()
-            winner_name = self._fmt_name(a if va > vb else b)
-            self.feedback_html.value = (
-                f"<div style='text-align:center;font-family:monospace;padding:8px'>"
-                f"<span style='font-size:20px;color:#e10600;font-weight:bold'>"
-                f"❌ INCORRECTO — Racha perdida</span>"
-                f"<span style='font-size:12px;color:#888;display:block;margin-top:2px'>"
-                f"Ganaba {winner_name}</span>"
-                f"</div>"
-            )
-            self.btn_restart.layout.display = ""
-            self.btn_next.layout.display    = ""
-
-    def _restart(self):
-        self._streak = 0
-        self._refresh_header()
-        self._next_round()
-
-
-
-
-# ══════════════════════════════════════════════════════════════════
-#  BASE DE DATOS — EVENTOS HISTÓRICOS F1
-#  Cada evento: (año, descripción, categoría)
-#  Categorías: "debut", "titulo", "accidente", "reglamento"
-# ══════════════════════════════════════════════════════════════════
 F1_EVENTS = [
     # ── Debuts de pilotos ────────────────────────────────────────
     (1950, "Debut de Juan Manuel Fangio en F1",                         "debut"),
@@ -5417,669 +4694,10 @@ F1_EVENTS = F1_EVENTS_CLEAN
 # ══════════════════════════════════════════════════════════════════
 #  MODO 5 — LÍNEA DE TIEMPO: Ordená los eventos
 # ══════════════════════════════════════════════════════════════════
-class TimelineGame:
-    CAT_COLORS = {
-        "debut":      ("#1565c0", "🏎️", "Debut"),
-        "titulo":     ("#b71c1c", "👑", "Título"),
-        "accidente":  ("#4a148c", "🚨", "Accidente"),
-        "reglamento": ("#1b5e20", "📋", "Reglamento"),
-        "victoria":   ("#e65100", "🏆", "Victoria"),
-        "record":     ("#880e4f", "⭐", "Récord"),
-    }
-    N = 5  # eventos por ronda
-
-    # Dificultad: (label, descripción, rango de años permitido, multiplicador pts)
-    DIFFS = {
-        "🟢 Fácil":   ("Eventos de décadas muy distintas",  None,        1),
-        "🟡 Medio":   ("Eventos de un rango de ~30 años",   30,          2),
-        "🔴 Difícil": ("Eventos de un rango de ~15 años",   15,          3),
-    }
-
-    def __init__(self):
-        self._score            = 0
-        self._ronda            = 0        # ronda global (histórico)
-        self._ronda_partida    = 0        # ronda dentro de la partida actual (1-10)
-        self._diff             = "🟢 Fácil"
-        self._events           = []
-        self._build_ui()
-
-    RONDAS_POR_PARTIDA = 10
-
-    # ─── UI principal ────────────────────────────────────────────
-    def _build_ui(self):
-        self.header_html   = widgets.HTML("")
-        self.msg_html      = widgets.HTML("")
-        self.list_box      = widgets.VBox([])
-
-        # Selector de dificultad
-        self.diff_toggle = widgets.ToggleButtons(
-            options=list(self.DIFFS.keys()),
-            value="🟢 Fácil",
-            button_style="",
-            style={"button_width": "130px", "font_weight": "bold"},
-        )
-        self.diff_toggle.observe(self._on_diff_change, names="value")
-
-        # Botón para arrancar después de elegir dificultad
-        self.btn_iniciar = widgets.Button(
-            description="▶ INICIAR",
-            layout=widgets.Layout(width="160px", height="42px"),
-            style={"button_color": "#b71c1c", "font_weight": "bold"},
-        )
-        self.btn_iniciar.on_click(lambda _: self._iniciar())
-
-        self.btn_confirmar = widgets.Button(
-            description="✔ CONFIRMAR ORDEN",
-            layout=widgets.Layout(width="220px", height="42px", display="none"),
-            style={"button_color": "#1a3a6a", "font_weight": "bold"},
-        )
-        self.btn_siguiente = widgets.Button(
-            description="➡ SIGUIENTE RONDA",
-            layout=widgets.Layout(width="220px", height="42px", display="none"),
-            style={"button_color": "#004d00", "font_weight": "bold"},
-        )
-        self.btn_confirmar.on_click(lambda _: self._confirmar())
-        self.btn_siguiente.on_click(lambda _: self._nueva_ronda())
-
-        self.btn_jugar_de_nuevo = widgets.Button(
-            description="🔄 JUGAR DE NUEVO",
-            layout=widgets.Layout(width="200px", height="42px", display="none"),
-            style={"button_color": "#b71c1c", "font_weight": "bold"},
-        )
-        self.btn_jugar_de_nuevo.on_click(lambda _: self._pedir_dificultad())
-
-        self.main = widgets.VBox(
-            [self.header_html,
-             widgets.HBox([self.diff_toggle],
-                          layout=widgets.Layout(justify_content="center", margin="4px 0")),
-             widgets.HBox([self.btn_iniciar, self.btn_confirmar,
-                           self.btn_siguiente, self.btn_jugar_de_nuevo],
-                          layout=widgets.Layout(justify_content="center",
-                                                gap="12px", margin="6px 0")),
-             self.msg_html,
-             self.list_box],
-            layout=widgets.Layout(max_width="700px", margin="0 auto"),
-        )
-        display(self.main)
-        self._pedir_dificultad()
-
-    def _pedir_dificultad(self):
-        """Muestra la pantalla inicial de selección de dificultad y resetea la partida."""
-        self._score         = 0
-        self._ronda_partida = 0
-        self.diff_toggle.disabled         = False
-        self.btn_iniciar.layout.display   = ""
-        self.btn_confirmar.layout.display = "none"
-        self.btn_siguiente.layout.display = "none"
-        self.btn_jugar_de_nuevo.layout.display = "none"
-        self.msg_html.value    = ""
-        self.list_box.children = []
-        self._refresh_header()
-
-    def _iniciar(self):
-        """El jugador confirmó la dificultad — arrancar la partida desde ronda 1."""
-        self._score         = 0
-        self._ronda_partida = 0
-        self._diff          = self.diff_toggle.value
-        self.btn_iniciar.layout.display   = "none"
-        self.btn_confirmar.layout.display = ""
-        self._nueva_ronda()
-
-    def _on_diff_change(self, change):
-        self._diff = change["new"]
-        self._refresh_header()
-
-    def _refresh_header(self):
-        _, desc, mult = self.DIFFS[self._diff]
-        mult_str = f"×{mult}" if mult > 1 else "×1"
-        progreso = f"Ronda <b>{self._ronda_partida}/{self.RONDAS_POR_PARTIDA}</b>" if self._ronda_partida > 0 else "Elegí la dificultad"
-        self.header_html.value = (
-            f"<div style='font-family:monospace;text-align:center;padding:8px 0'>"
-            f"<span style='font-size:22px;font-weight:bold;color:#e10600'>"
-            f"📅 LÍNEA DE TIEMPO</span>"
-            f"<br><span style='font-size:11px;color:#888'>"
-            f"Ordená los eventos de más antiguo a más reciente · {desc}</span>"
-            f"<br><div style='margin-top:6px'>"
-            f"<span style='color:#ffd700;font-size:14px'>{progreso}</span>"
-            f"&nbsp;&nbsp;"
-            f"<span style='color:#aaa;font-size:14px'>Mult: <b>{mult_str}</b></span>"
-            f"&nbsp;&nbsp;"
-            f"<span style='color:#aaa;font-size:14px'>⭐ Puntos: <b>{self._score}</b></span>"
-            f"</div></div>"
-        )
-
-    # ─── Lógica de ronda ─────────────────────────────────────────
-    def _nueva_ronda(self):
-        import random
-        self._ronda         += 1
-        self._ronda_partida += 1
-        self._refresh_header()
-        self.msg_html.value = ""
-        self.btn_siguiente.layout.display = "none"
-        self.btn_confirmar.layout.display = ""
-        self.btn_confirmar.disabled       = False
-        self.diff_toggle.disabled         = True  # bloqueado durante la partida
-
-        _, max_range, _ = self.DIFFS[self._diff]
-        pool = F1_EVENTS[:]
-
-        if max_range is None:
-            # Fácil: elegir de décadas distintas
-            random.shuffle(pool)
-            chosen = []
-            used_decades = set()
-            used_years   = set()
-            for ev in pool:
-                decade = (ev[0] // 10) * 10
-                if decade not in used_decades and ev[0] not in used_years:
-                    chosen.append(ev)
-                    used_decades.add(decade)
-                    used_years.add(ev[0])
-                if len(chosen) == self.N:
-                    break
-        else:
-            # Medio/Difícil: elegir un año ancla y tomar eventos cercanos
-            all_years = sorted(set(e[0] for e in pool))
-            for _ in range(200):
-                anchor = random.choice(all_years)
-                window = [e for e in pool
-                          if abs(e[0] - anchor) <= max_range]
-                years_in_window = sorted(set(e[0] for e in window))
-                if len(years_in_window) >= self.N:
-                    break
-            # Tomar N eventos con años distintos de la ventana
-            random.shuffle(window)
-            chosen     = []
-            used_years = set()
-            for ev in window:
-                if ev[0] not in used_years:
-                    chosen.append(ev)
-                    used_years.add(ev[0])
-                if len(chosen) == self.N:
-                    break
-            # Si no alcanza, completar con cualquier evento
-            if len(chosen) < self.N:
-                remaining = [e for e in pool if e[0] not in used_years]
-                random.shuffle(remaining)
-                for ev in remaining:
-                    if ev[0] not in used_years:
-                        chosen.append(ev)
-                        used_years.add(ev[0])
-                    if len(chosen) == self.N:
-                        break
-
-        random.shuffle(chosen)
-        self._events        = list(chosen)
-        self._correct_order = sorted(chosen, key=lambda e: e[0])
-        self._render_list()
-
-    def _render_list(self):
-        rows = []
-        for i, (yr, desc, cat) in enumerate(self._events):
-            color, icon, label = self.CAT_COLORS[cat]
-            badge = (
-                f"<span style='background:{color};color:white;border-radius:4px;"
-                f"padding:2px 6px;font-size:10px;font-family:monospace'>"
-                f"{icon} {label}</span>"
-            )
-            desc_html = widgets.HTML(
-                f"<div style='font-family:monospace;font-size:12px;"
-                f"color:#ddd;padding:4px 8px;flex:1'>"
-                f"{badge} &nbsp;{desc}</div>"
-            )
-            btn_up = widgets.Button(
-                description="▲",
-                layout=widgets.Layout(width="36px", height="36px"),
-                style={"button_color": "#1a3a1a"},
-                disabled=(i == 0),
-            )
-            btn_dn = widgets.Button(
-                description="▼",
-                layout=widgets.Layout(width="36px", height="36px"),
-                style={"button_color": "#3a1a1a"},
-                disabled=(i == len(self._events) - 1),
-            )
-            btn_up.on_click(lambda _, idx=i: self._move(idx, -1))
-            btn_dn.on_click(lambda _, idx=i: self._move(idx, +1))
-
-            pos_html = widgets.HTML(
-                f"<div style='font-family:monospace;font-size:14px;"
-                f"color:#555;width:22px;text-align:center'>{i+1}</div>"
-            )
-
-            row = widgets.HBox(
-                [pos_html, btn_up, btn_dn, desc_html],
-                layout=widgets.Layout(
-                    background="#1a1a1a",
-                    border="1px solid #333",
-                    border_radius="8px",
-                    margin="3px 0",
-                    align_items="center",
-                    padding="4px",
-                )
-            )
-            rows.append(row)
-        self.list_box.children = rows
-
-    def _move(self, idx, delta):
-        lst = self._events
-        new_idx = idx + delta
-        if 0 <= new_idx < len(lst):
-            lst[idx], lst[new_idx] = lst[new_idx], lst[idx]
-            self._events = lst
-            self._render_list()
-
-    # ─── Confirmar y puntuar ─────────────────────────────────────
-    def _confirmar(self):
-        self.btn_confirmar.disabled = True
-        correct = self._correct_order
-        player  = self._events
-
-        # Calcular posiciones correctas
-        hits = sum(1 for i in range(self.N) if player[i][1] == correct[i][1])
-        _, _, mult = self.DIFFS[self._diff]
-        # Puntos: 20 pts por posición correcta × multiplicador, bonus si perfecto
-        pts = hits * 20 * mult
-        if hits == self.N:
-            pts += 50 * mult
-
-        self._score += pts
-        self.diff_toggle.disabled = True   # no cambiar dificultad a mitad de ronda revelada
-        self._refresh_header()
-
-        # Mostrar resultado con años revelados
-        rows = []
-        for i, (yr, desc, cat) in enumerate(correct):
-            color, icon, label = self.CAT_COLORS[cat]
-            player_pos = next(j for j, e in enumerate(player) if e[1] == desc)
-            ok = (player_pos == i)
-            bg    = "#0a2a0a" if ok else "#2a0a0a"
-            mark  = "✅" if ok else "❌"
-            badge = (
-                f"<span style='background:{color};color:white;border-radius:4px;"
-                f"padding:2px 5px;font-size:10px'>{icon} {label}</span>"
-            )
-            row = widgets.HTML(
-                f"<div style='background:{bg};border:1px solid #333;"
-                f"border-radius:8px;padding:6px 10px;margin:3px 0;"
-                f"font-family:monospace;font-size:12px;color:#ddd'>"
-                f"{mark} <b style='color:#ffd700'>{yr}</b> &nbsp;"
-                f"{badge} &nbsp;{desc}</div>"
-            )
-            rows.append(row)
-
-        self.list_box.children = rows
-
-        # Mensaje de resultado
-        if hits == self.N:
-            msg_color, msg_txt = "#ffd700", f"🏆 ¡PERFECTO! +{pts} pts"
-        elif hits >= 3:
-            msg_color, msg_txt = "#00c853", f"✅ ¡Muy bien! {hits}/{self.N} correctos — +{pts} pts"
-        elif hits >= 1:
-            msg_color, msg_txt = "#ff9800", f"⚠️ {hits}/{self.N} correctos — +{pts} pts"
-        else:
-            msg_color, msg_txt = "#e10600", f"❌ 0 correctos — +0 pts"
-
-        self.msg_html.value = (
-            f"<div style='text-align:center;font-family:monospace;"
-            f"font-size:16px;color:{msg_color};padding:8px;font-weight:bold'>"
-            f"{msg_txt}</div>"
-            f"<div style='text-align:center;font-size:11px;color:#555;"
-            f"font-family:monospace'>Orden correcto arriba ↑</div>"
-        )
-        self.btn_confirmar.layout.display = "none"
-        # ¿Fin de partida?
-        if self._ronda_partida >= self.RONDAS_POR_PARTIDA:
-            self._fin_partida()
-        else:
-            self.btn_siguiente.layout.display = ""
-
-    def _fin_partida(self):
-        """Muestra la pantalla de fin de partida con puntuación final."""
-        _, _, mult = self.DIFFS[self._diff]
-        max_posible = self.RONDAS_POR_PARTIDA * (self.N * 20 + 50) * mult
-        pct = int(self._score / max_posible * 100) if max_posible > 0 else 0
-
-        if pct >= 90:   trofeo, color = "🏆 CAMPEÓN MUNDIAL",   "#ffd700"
-        elif pct >= 70: trofeo, color = "🥇 Gran actuación",     "#00c853"
-        elif pct >= 50: trofeo, color = "🥈 Buen intento",       "#ff9800"
-        elif pct >= 30: trofeo, color = "🥉 Seguí practicando",  "#e65100"
-        else:           trofeo, color = "💀 A estudiar más F1",  "#e10600"
-
-        self.list_box.children = []
-        self.msg_html.value = (
-            f"<div style='font-family:monospace;text-align:center;padding:16px;background:#111;"
-            f"border:2px solid #333;border-radius:12px;margin-top:8px'>"
-            f"<div style='font-size:28px;font-weight:bold;color:{color}'>{trofeo}</div>"
-            f"<div style='font-size:14px;color:#aaa;margin-top:8px'>"
-            f"Dificultad: <b style='color:#fff'>{self._diff}</b></div>"
-            f"<div style='font-size:32px;font-weight:bold;color:#ffd700;margin:12px 0'>"
-            f"⭐ {self._score} puntos</div>"
-            f"<div style='font-size:12px;color:#555'>"
-            f"Máximo posible: {max_posible} pts &nbsp;|&nbsp; Logrado: {pct}%</div>"
-            f"</div>"
-        )
-        self.btn_siguiente.layout.display      = "none"
-        self.btn_jugar_de_nuevo.layout.display = ""
-
 
 # ══════════════════════════════════════════════════════════════════
-#  MODO 6 — ¿QUIÉN SOY? PILOTO MISTERIOSO
-#  Pistas progresivas. Menos pistas usadas = más puntos.
+#  MODO 7 — CADENA DE PILOTOS: grafo de compañeros reales
 # ══════════════════════════════════════════════════════════════════
-class MysteryDriverGame:
-    # (descripción de la pista, campo a mostrar, puntos si acertás con ESTA pista)
-    PISTAS_DEF = [
-        ("época",        "epoca",       500),
-        ("nacionalidad", "nac",         400),
-        ("equipos",      "equipos",     300),
-        ("estadísticas", "stats",       200),
-        ("campeonatos",  "campeonatos", 100),
-    ]
-
-    def __init__(self):
-        self._score         = 0
-        self._pistas_vistas = 0
-        self._respondido    = False
-        self._vistos        = set()   # pilotos ya mostrados en esta sesión
-        self._todos_pilotos = sorted(n.title() for n in RAW_F1.keys())
-        self._build_ui()
-
-    # ── Construcción de UI ───────────────────────────────────────
-    def _build_ui(self):
-        self.header_html = widgets.HTML("")
-        self.pistas_box  = widgets.VBox([])
-        self.msg_html    = widgets.HTML("")
-
-        # Combobox con autocompletado
-        self.input_combo = widgets.Combobox(
-            placeholder="Escribí el nombre o apellido...",
-            options=self._todos_pilotos,
-            ensure_option=False,
-            layout=widgets.Layout(width="320px", height="36px"),
-        )
-        self.input_combo.on_submit(lambda w: self._responder(w.value))
-
-        # Live feedback: verde si el nombre/apellido coincide con alguien de la BD
-        def _live_check(change):
-            val = normalize(change['new'].strip().lower())
-            if not val:
-                self.input_combo.layout.border = ""
-                return
-            # Verificar si coincide con algún piloto (nombre completo o apellido)
-            match = any(
-                val == normalize(n.lower()) or
-                val == normalize(n.lower().split()[-1]) or
-                (len(val) >= 4 and val in normalize(n.lower()))
-                for n in RAW_F1
-            )
-            self.input_combo.layout.border = (
-                "2px solid #00c853" if match else "2px solid #f9a825"
-            )
-        self.input_combo.observe(_live_check, names='value')
-
-        self.btn_responder = widgets.Button(
-            description="✔ RESPONDER",
-            layout=widgets.Layout(width="150px", height="36px"),
-            style={"button_color": "#1a3a6a", "font_weight": "bold"},
-        )
-        self.btn_pista = widgets.Button(
-            description="💡 VER PISTA",
-            layout=widgets.Layout(width="140px", height="36px"),
-            style={"button_color": "#4a3000", "font_weight": "bold"},
-        )
-        self.btn_siguiente = widgets.Button(
-            description="➡ SIGUIENTE",
-            layout=widgets.Layout(width="140px", height="36px", display="none"),
-            style={"button_color": "#004d00", "font_weight": "bold"},
-        )
-
-        self.btn_responder.on_click(lambda _: self._responder(self.input_combo.value))
-        self.btn_pista.on_click(lambda _: self._ver_pista())
-        self.btn_siguiente.on_click(lambda _: self._nueva_ronda())
-
-        self.btn_daily = widgets.ToggleButton(
-            value=False, description="📅 Diario",
-            layout=widgets.Layout(width="110px", height="36px"),
-            button_style="",
-        )
-        self.btn_daily.observe(self._on_daily_toggle, names="value")
-
-        self.main = widgets.VBox([
-            self.header_html,
-            self.pistas_box,
-            self.msg_html,
-            widgets.HBox(
-                [self.btn_daily, self.input_combo, self.btn_responder,
-                 self.btn_pista, self.btn_siguiente],
-                layout=widgets.Layout(justify_content="center",
-                                      gap="8px", margin="8px 0",
-                                      flex_wrap="wrap"),
-            ),
-        ], layout=widgets.Layout(max_width="700px", margin="0 auto"))
-
-        display(self.main)
-        self._nueva_ronda()
-
-    # ── Header ───────────────────────────────────────────────────
-    def _refresh_header(self):
-        idx      = min(self._pistas_vistas, len(self.PISTAS_DEF)) - 1
-        pts_now  = self.PISTAS_DEF[idx][2] if idx >= 0 else 500
-        total    = len([n for n,d in RAW_F1.items() if d[2]>0 or d[3]>0 or bool(d[4])])
-        vistos   = len(self._vistos)
-        self.header_html.value = (
-            f"<div style='font-family:monospace;text-align:center;padding:8px 0'>"
-            f"<span style='font-size:22px;font-weight:bold;color:#e10600'>🕵️ ¿QUIÉN SOY?</span>"
-            f"<br><span style='font-size:11px;color:#888'>"
-            f"Adiviná el piloto con la menor cantidad de pistas posibles</span>"
-            f"<br><div style='margin-top:6px'>"
-            f"<span style='color:#aaa;font-size:14px'>⭐ Puntos: <b>{self._score}</b></span>"
-            f"&nbsp;&nbsp;"
-            f"<span style='color:#00c853;font-size:13px'>Si acertás ahora: <b>+{pts_now}</b></span>"
-            f"&nbsp;&nbsp;"
-            f"<span style='color:#555;font-size:11px'>Vistos: {vistos}/{total}</span>"
-            f"</div></div>"
-        )
-
-    def _on_daily_toggle(self, change):
-        self.btn_daily.description  = "📅 Diario ON" if change["new"] else "📅 Diario"
-        self.btn_daily.button_style = "warning"      if change["new"] else ""
-        self._nueva_ronda()
-
-    def _daily_seed_mystery(self):
-        import hashlib, datetime
-        today  = datetime.date.today().isoformat()
-        digest = int(hashlib.md5(f"mystery-{today}".encode()).hexdigest(), 16)
-        return digest % (2**31)
-
-    def _already_played_mystery(self):
-        import datetime, json, pathlib
-        today = datetime.date.today().isoformat()
-        key   = f"mystery-daily-{today}"
-        try:
-            data = json.loads(pathlib.Path("~/.f1grid_data.json").expanduser().read_text())
-            return data.get("daily_played", {}).get(key, False)
-        except Exception:
-            return False
-
-    def _mark_mystery_played(self):
-        import datetime, json, pathlib
-        today = datetime.date.today().isoformat()
-        key   = f"mystery-daily-{today}"
-        p     = pathlib.Path("~/.f1grid_data.json").expanduser()
-        try:
-            data = json.loads(p.read_text()) if p.exists() else {}
-        except Exception:
-            data = {}
-        data.setdefault("daily_played", {})[key] = True
-        p.write_text(json.dumps(data))
-
-    # ── Lógica de ronda ──────────────────────────────────────────
-    def _nueva_ronda(self):
-        import random
-        self._pistas_vistas = 0
-        self._respondido    = False
-
-        candidatos = [(n, d) for n, d in RAW_F1.items()
-                      if (d[2] > 0 or d[3] > 0 or bool(d[4])) and n not in self._vistos]
-        if not candidatos:
-            self._vistos = set()
-            candidatos = [(n, d) for n, d in RAW_F1.items()
-                          if d[2] > 0 or d[3] > 0 or bool(d[4])]
-
-        if self.btn_daily.value:
-            # Modo diario: mismo piloto para todos hoy
-            rng = random.Random(self._daily_seed_mystery())
-            todos = sorted([(n, d) for n, d in RAW_F1.items()
-                            if d[2] > 0 or d[3] > 0 or bool(d[4])], key=lambda x: x[0])
-            self._piloto_nombre, self._piloto_data = rng.choice(todos)
-            if self._already_played_mystery():
-                self.msg_html.value = (
-                    "<div style='text-align:center;font-family:monospace;"
-                    "font-size:14px;color:#ff9800;padding:8px'>"
-                    "📅 Ya jugaste el piloto del día. ¡Volvé mañana!</div>"
-                )
-                self.btn_responder.disabled = True
-                self.btn_pista.disabled     = True
-        else:
-            self._piloto_nombre, self._piloto_data = random.choice(candidatos)
-        self._vistos.add(self._piloto_nombre)
-
-        self.input_combo.value              = ""
-        self.input_combo.disabled           = False
-        self.btn_responder.disabled         = False
-        self.btn_pista.disabled             = False
-        self.btn_siguiente.layout.display   = "none"
-        self.msg_html.value                 = ""
-
-        self._refresh_header()
-        self._render_pistas()
-        self._mostrar_pista()   # primera pista siempre gratis
-
-    # ── Pistas ───────────────────────────────────────────────────
-    def _pista_texto(self, idx):
-        label, desc, pts = self.PISTAS_DEF[idx]
-        d = self._piloto_data
-        equipos, nac, wins, podios, champ, debut, academy, birth, seasons, last = d
-
-        if desc == "epoca":
-            decada = (debut // 10) * 10
-            txt = f"Debutó en la <b>década del {decada}</b>"
-        elif desc == "nac":
-            txt = f"Nacionalidad: <b>{nac.capitalize()}</b>"
-        elif desc == "equipos":
-            eq = equipos
-            if len(eq) == 1:
-                txt = f"Corrió solo para <b>{eq[0].title()}</b>"
-            elif len(eq) == 2:
-                txt = f"Corrió para <b>{eq[0].title()}</b> y <b>{eq[1].title()}</b>"
-            else:
-                txt = (f"Primer equipo: <b>{eq[0].title()}</b>"
-                       f" &nbsp;·&nbsp; Último: <b>{eq[-1].title()}</b>")
-        elif desc == "stats":
-            txt = f"Victorias: <b>{wins}</b> &nbsp;·&nbsp; Podios: <b>{podios}</b>"
-        elif desc == "campeonatos":
-            c      = int(bool(champ)) if isinstance(champ, bool) else champ
-            activo = "activo" if last == 0 else f"retirado en {last}"
-            txt    = (f"Campeonatos: <b>{c}</b> &nbsp;·&nbsp;"
-                      f" Temporadas: <b>{seasons}</b> &nbsp;·&nbsp; {activo}")
-        else:
-            txt = "?"
-        return label.capitalize(), txt, pts
-
-    def _render_pistas(self):
-        rows = []
-        for i in range(self._pistas_vistas):
-            label, txt, pts = self._pista_texto(i)
-            rows.append(widgets.HTML(
-                f"<div style='background:#1a1a1a;border:1px solid #333;"
-                f"border-radius:8px;padding:8px 14px;margin:3px 0;"
-                f"font-family:monospace;font-size:13px;color:#ddd'>"
-                f"<span style='color:#888;font-size:10px'>PISTA {i+1} · {label} · "
-                f"<span style='color:#ffd700'>{pts} pts si acertás</span></span>"
-                f"<br>{txt}</div>"
-            ))
-        self.pistas_box.children = rows
-
-    def _mostrar_pista(self):
-        if self._pistas_vistas < len(self.PISTAS_DEF):
-            self._pistas_vistas += 1
-            self._render_pistas()
-            self._refresh_header()
-            if self._pistas_vistas >= len(self.PISTAS_DEF):
-                self.btn_pista.disabled = True
-
-    def _ver_pista(self):
-        if not self._respondido:
-            self._mostrar_pista()
-
-    # ── Respuesta ────────────────────────────────────────────────
-    def _responder(self, valor):
-        if self._respondido:
-            return
-        valor = normalize(valor.strip().lower())
-        if not valor:
-            return
-
-        self._respondido            = True
-        self.input_combo.disabled   = True
-        self.btn_responder.disabled = True
-        self.btn_pista.disabled     = True
-
-        correcto      = normalize(self._piloto_nombre.lower())
-        partes        = correcto.split()          # ["ayrton", "senna"]
-        apellido      = partes[-1]                # "senna"
-        primer_nombre = partes[0] if partes else correcto
-
-        # Coincidencia flexible:
-        # 1. Nombre completo exacto
-        # 2. Solo apellido (última palabra)
-        # 3. Solo primer nombre (si es corto y único)
-        # 4. El valor ingresado está contenido en el nombre completo (substring)
-        # 5. El nombre completo está contenido en el valor (por si escriben más)
-        acierto = (
-            valor == correcto
-            or valor == apellido
-            or (len(primer_nombre) >= 4 and valor == primer_nombre)
-            or (len(valor) >= 4 and valor in correcto)
-            or correcto in valor
-        )
-
-        if acierto:
-            pts = self.PISTAS_DEF[self._pistas_vistas - 1][2]
-            self._score += pts
-            color = "#ffd700" if pts >= 400 else "#00c853"
-            emoji = "🏆" if pts == 500 else "✅"
-            msg   = f"{emoji} ¡CORRECTO! &nbsp;<b>+{pts} pts</b>"
-        else:
-            pts   = 0
-            color = "#e10600"
-            msg   = (f"❌ Incorrecto — era "
-                     f"<b style='color:#ffd700'>{self._piloto_nombre.title()}</b>")
-
-        # Revelar todas las pistas restantes
-        self._pistas_vistas = len(self.PISTAS_DEF)
-        self._render_pistas()
-        self._refresh_header()
-
-        self.msg_html.value = (
-            f"<div style='text-align:center;font-family:monospace;"
-            f"font-size:16px;color:{color};padding:8px;font-weight:bold'>{msg}</div>"
-        )
-        if self.btn_daily.value:
-            self._mark_mystery_played()
-            self.btn_siguiente.layout.display = "none"
-        else:
-            self.btn_siguiente.layout.display = ""
-
-
-# ══════════════════════════════════════════════════════════════════
-#  GRAFO DE COMPAÑEROS DE EQUIPO — basado en años reales
-#  Dos pilotos son compañeros si coincidieron en el mismo equipo
-#  el mismo año (o rango de años solapado).
-# ══════════════════════════════════════════════════════════════════
-
-# Tabla de piloto → [(equipo, año_inicio, año_fin), ...]
 _DRIVER_YEARS = {
     "max verstappen":       [("toro rosso",2015,2015),("red bull",2016,2026)],
     "charles leclerc":      [("sauber",2018,2018),("ferrari",2019,2026)],
@@ -6393,558 +5011,10 @@ def _pick_chain_pair(min_hops=2, max_hops=4):
     return a, b, _chain_bfs(a, b) or [a, b]
 
 # ══════════════════════════════════════════════════════════════════
-#  MODO 7 — CADENA DE PILOTOS
-# ══════════════════════════════════════════════════════════════════
-class ChainGame:
-    DIFFS = {
-        "🟢 Fácil":    {"min_hops": 2, "max_hops": 3, "max_steps": 8,  "pts_base": 200},
-        "🟡 Medio":    {"min_hops": 3, "max_hops": 4, "max_steps": 6,  "pts_base": 400},
-        "🔴 Difícil":  {"min_hops": 4, "max_hops": 5, "max_steps": 5,  "pts_base": 700},
-    }
-
-    def __init__(self):
-        self.diff       = "🟡 Medio"
-        self.start      = None
-        self.end        = None
-        self.chain      = []
-        self.optimal    = 0
-        self.steps_left = 0
-        self.solved     = False
-        self.failed     = False
-        self.score      = 0
-        self.total_pts  = self._load_pts()
-        self._build_ui()
-
-    # ── Persistencia ─────────────────────────────────────────────
-    def _load_pts(self):
-        try:
-            import json, pathlib
-            d = json.loads(pathlib.Path("~/.f1grid_data.json").expanduser().read_text())
-            return d.get("total_pts", 0)
-        except Exception:
-            return 0
-
-    def _save_pts(self, extra):
-        try:
-            import json, pathlib
-            p = pathlib.Path("~/.f1grid_data.json").expanduser()
-            d = json.loads(p.read_text()) if p.exists() else {}
-            d["total_pts"] = d.get("total_pts", 0) + extra
-            p.write_text(json.dumps(d))
-            self.total_pts = d["total_pts"]
-        except Exception:
-            pass
-
-    # ── UI ────────────────────────────────────────────────────────
-    def _build_ui(self):
-        self.output = widgets.Output()
-
-        title = widgets.HTML(
-            "<h2 style='font-family:monospace;color:#e10600;margin:0'>"
-            "🔗 CADENA DE PILOTOS</h2>"
-            "<p style='font-family:monospace;font-size:12px;color:#888;margin:2px 0 0'>"
-            "Conectá dos pilotos pasando por compañeros de equipo</p>"
-        )
-
-        diff_lbl = widgets.Label("Dificultad:")
-        self.diff_sel = widgets.ToggleButtons(
-            options=list(self.DIFFS.keys()),
-            value=self.diff,
-            style={"button_width": "110px"},
-        )
-        self.diff_sel.observe(self._on_diff, names="value")
-
-        self.btn_new = widgets.Button(
-            description="🆕 Nueva Cadena", button_style="danger",
-            layout=widgets.Layout(width="150px"),
-        )
-        self.btn_new.on_click(self._new_game)
-
-        self.pts_label = widgets.HTML(self._pts_html())
-
-        top_bar = widgets.HBox(
-            [diff_lbl, self.diff_sel, self.btn_new, self.pts_label],
-            layout=widgets.Layout(align_items="center", gap="10px",
-                                  flex_flow="row wrap", margin="8px 0"),
-        )
-
-        self.main_widget = widgets.VBox(
-            [title, top_bar, self.output],
-            layout=widgets.Layout(
-                padding="14px", border="2px solid #e10600",
-                border_radius="10px", max_width="900px",
-            ),
-        )
-        display(self.main_widget)
-
-    def _pts_html(self):
-        return (f"<span style='font-family:monospace;font-size:13px'>"
-                f"⭐ {self.total_pts} pts</span>")
-
-    def _on_diff(self, change):
-        self.diff = change["new"]
-
-    # ── Nueva partida ─────────────────────────────────────────────
-    def _new_game(self, b=None):
-        cfg = self.DIFFS[self.diff]
-        self.start, self.end, optimal_path = _pick_chain_pair(
-            cfg["min_hops"], cfg["max_hops"]
-        )
-        self.optimal    = len(optimal_path) - 1
-        self.chain      = [self.start]
-        self.steps_left = cfg["max_steps"]
-        self.solved     = False
-        self.failed     = False
-        self.score      = 0
-        self._render()
-
-    # ── Render principal ──────────────────────────────────────────
-    def _render(self):
-        FLAGS_NAT = {
-            "española":"🇪🇸","británica":"🇬🇧","alemana":"🇩🇪","finlandesa":"🇫🇮",
-            "australiana":"🇦🇺","brasileña":"🇧🇷","mexicana":"🇲🇽","francesa":"🇫🇷",
-            "monegasca":"🇲🇨","neerlandesa":"🇳🇱","argentina":"🇦🇷","italiana":"🇮🇹",
-            "japonesa":"🇯🇵","austriaca":"🇦🇹","colombiana":"🇨🇴","danesa":"🇩🇰",
-            "neozelandesa":"🇳🇿","sueca":"🇸🇪","sudafricana":"🇿🇦","estadounidense":"🇺🇸",
-            "suiza":"🇨🇭","belga":"🇧🇪","venezolana":"🇻🇪","tailandesa":"🇹🇭",
-            "canadiense":"🇨🇦","rusa":"🇷🇺","portuguesa":"🇵🇹","húngara":"🇭🇺",
-            "irlandesa":"🇮🇪","china":"🇨🇳","noruega":"🇳🇴","estonia":"🇪🇪",
-            "polaca":"🇵🇱","turca":"🇹🇷","indonesia":"🇮🇩","checa":"🇨🇿",
-            "ecuatoriana":"🇪🇨","paraguaya":"🇵🇾",
-        }
-        def nf(nat): return FLAGS_NAT.get(nat, "🏁")
-
-        # Acumular todos los widgets; un único display() al final evita
-        # problemas de contexto cuando _render se llama desde callbacks.
-        parts = []
-
-        if self.start is None:
-            parts.append(widgets.HTML(
-                "<div style='font-family:monospace;color:#888;padding:12px'>"
-                "Presioná 🆕 Nueva Cadena para empezar.</div>"
-            ))
-            self.output.clear_output(wait=True)
-            with self.output:
-                display(widgets.VBox(parts))
-            return
-
-        # ── Header: inicio y destino ──────────────────────────
-        meta_a = SERIES_F1.drivers_meta[self.start]
-        meta_b = SERIES_F1.drivers_meta[self.end]
-        parts.append(widgets.HTML(
-            f"<div style='display:flex;gap:20px;align-items:center;margin:10px 0'>"
-            f"<div style='background:#1a0000;border:2px solid #e10600;border-radius:8px;"
-            f"padding:12px 20px;text-align:center;min-width:160px'>"
-            f"<div style='font-size:1.8rem'>{nf(meta_a['nationality'])}</div>"
-            f"<div style='font-family:monospace;font-size:14px;font-weight:bold;"
-            f"color:#e10600'>{self.start.title()}</div>"
-            f"<div style='font-size:10px;color:#666'>INICIO</div></div>"
-            f"<div style='font-family:monospace;text-align:center;color:#888'>"
-            f"⏩ {self.optimal} salto{'s' if self.optimal!=1 else ''} óptimo<br>"
-            f"🔢 {self.steps_left} pasos restantes</div>"
-            f"<div style='background:#001a00;border:2px solid #2e7d32;border-radius:8px;"
-            f"padding:12px 20px;text-align:center;min-width:160px'>"
-            f"<div style='font-size:1.8rem'>{nf(meta_b['nationality'])}</div>"
-            f"<div style='font-family:monospace;font-size:14px;font-weight:bold;"
-            f"color:#2e7d32'>{self.end.title()}</div>"
-            f"<div style='font-size:10px;color:#666'>DESTINO</div></div>"
-            f"</div>"
-        ))
-
-        # ── Cadena construida ─────────────────────────────────
-        if len(self.chain) > 1 or self.solved or self.failed:
-            chain_html = "<div style='margin:8px 0;font-family:monospace;font-size:13px'><b>Tu cadena:</b><br>"
-            for i, driver in enumerate(self.chain):
-                meta  = SERIES_F1.drivers_meta.get(driver, {})
-                color = "#e10600" if i == 0 else "#2e7d32" if driver == self.end else "#ffd700"
-                chain_html += (
-                    f"<span style='background:#1a1a1a;border:1px solid {color};"
-                    f"border-radius:4px;padding:2px 8px;color:{color}'>"
-                    f"{nf(meta.get('nationality',''))} {driver.title()}</span>"
-                )
-                if i < len(self.chain) - 1:
-                    teams    = _chain_teams_between(driver, self.chain[i+1])
-                    team_str = teams[0] if teams else "?"
-                    chain_html += f" <span style='color:#444'>—[{team_str}]→</span> "
-            chain_html += "</div>"
-            parts.append(widgets.HTML(chain_html))
-
-        # ── Mensaje final ─────────────────────────────────────
-        if self.solved:
-            hops  = len(self.chain) - 1
-            bonus = max(0, self.optimal - hops + 1)
-            cfg   = self.DIFFS[self.diff]
-            pts   = cfg["pts_base"] + bonus * 100
-            msg   = (f"🏆 ¡RESUELTO en {hops} salto{'s' if hops!=1 else ''}! "
-                     f"(óptimo: {self.optimal}) — +{pts} pts")
-            if hops <= self.optimal:
-                msg += " 🌟 ¡CADENA ÓPTIMA!"
-            parts.append(widgets.HTML(
-                f"<div style='background:#0a2a0a;border:2px solid #2e7d32;"
-                f"border-radius:8px;padding:10px;font-family:monospace;"
-                f"font-size:14px;color:#00c853'>{msg}</div>"
-            ))
-        elif self.failed:
-            parts.append(widgets.HTML(
-                f"<div style='background:#2a0a0a;border:2px solid #c62828;"
-                f"border-radius:8px;padding:10px;font-family:monospace;"
-                f"font-size:14px;color:#ef9a9a'>"
-                f"❌ Sin pasos restantes. Presioná 🆕 Nueva Cadena.</div>"
-            ))
-
-        # ── Input siguiente eslabón (solo si el juego sigue) ──
-        if not self.failed and not self.solved:
-            current   = self.chain[-1]
-            neighbors = sorted(
-                _CHAIN_GRAPH.get(current, set()) - set(self.chain),
-                key=lambda x: x.title()
-            )
-            info = widgets.HTML(
-                f"<div style='font-family:monospace;font-size:12px;color:#888;margin:6px 0'>"
-                f"Compañeros de <b style='color:#ffd700'>{current.title()}</b>: "
-                f"{len(neighbors)} disponibles</div>"
-            )
-            self.next_sel = widgets.Dropdown(
-                options=[""] + [n.title() for n in neighbors],
-                value="",
-                layout=widgets.Layout(width="280px"),
-            )
-            self.next_sel.observe(self._on_select_change, names="value")
-            self.feedback_html = widgets.HTML("")
-            btn_add = widgets.Button(
-                description="➕ Agregar eslabón",
-                button_style="primary",
-                layout=widgets.Layout(width="160px"),
-            )
-            btn_add.on_click(self._add_link)
-            parts.append(widgets.VBox([
-                info,
-                widgets.HBox(
-                    [self.next_sel, btn_add, self.feedback_html],
-                    layout=widgets.Layout(align_items="center", gap="10px")
-                ),
-            ]))
-
-        # ── Único display al final ────────────────────────────
-        self.output.clear_output(wait=True)
-        with self.output:
-            display(widgets.VBox(parts))
-
-    def _show_board(self): pass   # reemplazado por _render
-
-    def _show_input(self): pass   # reemplazado por _render
-
-    def _on_select_change(self, change):
-        val = normalize(change["new"])
-        if not val:
-            self.feedback_html.value = ""
-            return
-        if val == self.end:
-            self.feedback_html.value = (
-                "<span style='color:#00c853;font-family:monospace'>"
-                "🎯 ¡Este es el destino!</span>"
-            )
-        elif val in _CHAIN_GRAPH.get(self.end, set()):
-            self.feedback_html.value = (
-                "<span style='color:#ffd700;font-family:monospace'>"
-                "🔥 ¡Está a 1 paso del destino!</span>"
-            )
-        else:
-            self.feedback_html.value = ""
-
-    def _add_link(self, b=None):
-        val = normalize(self.next_sel.value)
-        if not val:
-            return
-        self.chain.append(val)
-        self.steps_left -= 1
-
-        if val == self.end:
-            self.solved = True
-            hops   = len(self.chain) - 1
-            bonus  = max(0, self.optimal - hops + 1)
-            cfg    = self.DIFFS[self.diff]
-            pts    = cfg["pts_base"] + bonus * 100
-            self.score = pts
-            self._save_pts(pts)
-            self.pts_label.value = self._pts_html()
-        elif self.steps_left <= 0:
-            self.failed = True
-
-        self._render()
 
 
 # ══════════════════════════════════════════════════════════════════
-#  MODO 8 — ¿QUIÉN GANÓ?
-# ══════════════════════════════════════════════════════════════════
-class WhoWonGame:
-    """
-    Te muestro un año y un Gran Premio.
-    ¿Quién ganó esa carrera? Elegí entre 4 opciones.
-    Racha infinita. Modo diario. Puntos según velocidad.
-    """
-    PTS_TABLE = [500, 400, 300, 200, 100]   # por tiempo de respuesta
-
-    def __init__(self):
-        self._data    = self._build_pool()
-        self.streak   = 0
-        self.score    = 0
-        self.total    = 0
-        self.correct  = 0
-        self.answered = False
-        self._q       = None          # pregunta actual
-        self._t0      = None          # timestamp de inicio
-        self.daily    = False
-
-        self._load_pts()
-        self._build_ui()
-
-    # ── Persistencia ─────────────────────────────────────────────
-    def _load_pts(self):
-        import json, os
-        p = os.path.expanduser("~/.f1grid_data.json")
-        try:
-            d = json.loads(open(p).read())
-            self.score = d.get("whowon_score", 0)
-        except Exception:
-            pass
-
-    def _save_pts(self, pts):
-        import json, os
-        p = os.path.expanduser("~/.f1grid_data.json")
-        try:
-            d = json.loads(open(p).read()) if os.path.exists(p) else {}
-        except Exception:
-            d = {}
-        d["whowon_score"] = self.score + pts
-        self.score += pts
-        open(p, "w").write(json.dumps(d))
-
-    # ── Pool de preguntas ─────────────────────────────────────────
-    def _build_pool(self):
-        pool = []
-        for year, gps in GP_RESULTS.items():
-            for gp, results in gps.items():
-                if results:
-                    pool.append((year, gp, results[0]))
-        return pool
-
-    def _all_winners(self):
-        return list({r[2] for r in self._data})
-
-    # ── UI ────────────────────────────────────────────────────────
-    def _build_ui(self):
-        C = COLORS
-
-        # Controles superiores
-        self.btn_new   = widgets.Button(description="🆕 Nueva Pregunta",
-                                        button_style="warning",
-                                        layout=widgets.Layout(width="160px"))
-        self.btn_daily = widgets.Button(description="📅 Modo Diario",
-                                        button_style="info",
-                                        layout=widgets.Layout(width="130px"))
-        self.pts_label = widgets.HTML(self._pts_html())
-
-        self.btn_new.on_click(self._new_question)
-        self.btn_daily.on_click(self._daily_question)
-
-        top_bar = widgets.HBox(
-            [self.btn_new, self.btn_daily, self.pts_label],
-            layout=widgets.Layout(gap="10px", align_items="center", margin="0 0 10px 0")
-        )
-
-        # Estadísticas rápidas
-        self.stats_label = widgets.HTML(self._stats_html())
-
-        # Área de juego
-        self.output = widgets.Output()
-
-        self.main = widgets.VBox(
-            [top_bar, self.stats_label, self.output],
-            layout=widgets.Layout(max_width="680px")
-        )
-        display(self.main)
-        self._new_question()
-
-    def _pts_html(self):
-        return (f"<span style='font-family:monospace;font-size:13px;color:#ffd700'>"
-                f"⭐ {self.score} pts</span>")
-
-    def _stats_html(self):
-        pct = int(self.correct / self.total * 100) if self.total else 0
-        return (
-            f"<div style='font-family:monospace;font-size:12px;color:#888'>"
-            f"🔥 Racha: <b style='color:#ffd700'>{self.streak}</b>  |  "
-            f"✅ {self.correct}/{self.total} ({pct}%)  |  "
-            f"</div>"
-        )
-
-    # ── Preguntas ─────────────────────────────────────────────────
-    def _pick_question(self, seed=None):
-        import time
-        rng = random.Random(seed) if seed is not None else random
-        year, gp, winner = rng.choice(self._data)
-
-        # 3 distractores: otros ganadores reales
-        all_w = [w for w in self._all_winners() if w != winner]
-        distractors = rng.sample(all_w, min(3, len(all_w)))
-        options = [winner] + distractors
-        rng.shuffle(options)
-        return {"year": year, "gp": gp, "winner": winner, "options": options}
-
-    def _new_question(self, b=None):
-        self.daily    = False
-        self._q       = self._pick_question()
-        self.answered = False
-        self._t0      = __import__("time").time()
-        self._render()
-
-    def _daily_question(self, b=None):
-        import datetime
-        seed = int(datetime.date.today().strftime("%Y%m%d")) + 80000
-        self.daily    = True
-        self._q       = self._pick_question(seed=seed)
-        self.answered = False
-        self._t0      = __import__("time").time()
-        self._render()
-
-    # ── Respuesta ─────────────────────────────────────────────────
-    def _answer(self, chosen):
-        if self.answered:
-            return
-        import time
-        elapsed = time.time() - self._t0
-        self.answered = True
-        self.total   += 1
-        correct = (chosen == self._q["winner"])
-
-        if correct:
-            self.correct += 1
-            self.streak  += 1
-            # puntos según velocidad: < 3s, <6s, <10s, <20s, resto
-            if   elapsed <  3: pts = self.PTS_TABLE[0]
-            elif elapsed <  6: pts = self.PTS_TABLE[1]
-            elif elapsed < 10: pts = self.PTS_TABLE[2]
-            elif elapsed < 20: pts = self.PTS_TABLE[3]
-            else:              pts = self.PTS_TABLE[4]
-            self._save_pts(pts)
-            self.pts_label.value = self._pts_html()
-        else:
-            self.streak = 0
-            pts = 0
-
-        self._q["chosen"]  = chosen
-        self._q["pts"]     = pts
-        self._q["elapsed"] = elapsed
-        self._q["correct"] = correct
-        self.stats_label.value = self._stats_html()
-        self._render()
-
-    # ── Render ────────────────────────────────────────────────────
-    def _render(self):
-        if self._q is None:
-            return
-
-        q = self._q
-        parts = []
-
-        # ── Título del GP ──────────────────────────────────────
-        daily_badge = " 📅 <span style='color:#64b5f6'>DIARIO</span>" if self.daily else ""
-        parts.append(widgets.HTML(
-            f"<div style='background:#111;border:2px solid #e10600;border-radius:10px;"
-            f"padding:16px 24px;margin:8px 0;text-align:center'>"
-            f"<div style='font-family:monospace;font-size:11px;color:#888;margin-bottom:4px'>"
-            f"¿QUIÉN GANÓ?{daily_badge}</div>"
-            f"<div style='font-size:22px;font-weight:bold;font-family:monospace;"
-            f"color:#ffd700'>{q['year']} — {q['gp'].upper()}</div>"
-            f"</div>"
-        ))
-
-        if not self.answered:
-            # ── Botones de opción ──────────────────────────────
-            btn_row = []
-            for opt in q["options"]:
-                meta = SERIES_F1.drivers_meta.get(opt, {})
-                nat  = meta.get("nationality", "")
-                flag = {"española":"🇪🇸","británica":"🇬🇧","alemana":"🇩🇪",
-                        "finlandesa":"🇫🇮","australiana":"🇦🇺","brasileña":"🇧🇷",
-                        "mexicana":"🇲🇽","francesa":"🇫🇷","monegasca":"🇲🇨",
-                        "neerlandesa":"🇳🇱","argentina":"🇦🇷","italiana":"🇮🇹",
-                        "finlandesa":"🇫🇮","austriaca":"🇦🇹"}.get(nat, "🏁")
-                btn = widgets.Button(
-                    description=f"{flag} {opt.title()}",
-                    layout=widgets.Layout(width="260px", height="44px"),
-                    style={"font_size": "13px"},
-                )
-                btn.on_click(lambda b, o=opt: self._answer(o))
-                btn_row.append(btn)
-
-            parts.append(widgets.VBox([
-                widgets.HBox(btn_row[:2],
-                             layout=widgets.Layout(gap="12px", margin="8px 0")),
-                widgets.HBox(btn_row[2:],
-                             layout=widgets.Layout(gap="12px", margin="0 0 8px 0")),
-            ]))
-        else:
-            # ── Resultado ─────────────────────────────────────
-            winner = q["winner"]
-            chosen = q.get("chosen", "")
-            ok     = q.get("correct", False)
-            pts    = q.get("pts", 0)
-            secs   = q.get("elapsed", 0)
-
-            meta_w = SERIES_F1.drivers_meta.get(winner, {})
-            wins   = meta_w.get("wins", "?")
-            champs = meta_w.get("champion", 0)
-            champ_str = f" 🏆×{champs}" if champs else ""
-
-            color   = "#00c853" if ok else "#ef9a9a"
-            bg      = "#0a2a0a" if ok else "#2a0a0a"
-            border  = "#2e7d32" if ok else "#c62828"
-            icon    = "✅" if ok else "❌"
-            msg_top = f"{icon} ¡CORRECTO! +{pts} pts ({secs:.1f}s)" if ok else f"{icon} INCORRECTO — Era <b>{winner.title()}</b>"
-
-            # Mostrar todas las opciones coloreadas
-            opts_html = "<div style='display:flex;flex-wrap:wrap;gap:8px;margin:10px 0'>"
-            for opt in q["options"]:
-                if opt == winner:
-                    c = "#00c853"; bc = "#2e7d32"; bg2 = "#0a2a0a"
-                elif opt == chosen and not ok:
-                    c = "#ef9a9a"; bc = "#c62828"; bg2 = "#2a0a0a"
-                else:
-                    c = "#555"; bc = "#333"; bg2 = "#0a0a0a"
-                opts_html += (
-                    f"<span style='background:{bg2};border:1px solid {bc};"
-                    f"border-radius:6px;padding:6px 14px;font-family:monospace;"
-                    f"font-size:13px;color:{c}'>{opt.title()}</span>"
-                )
-            opts_html += "</div>"
-
-            parts.append(widgets.HTML(
-                f"<div style='background:{bg};border:2px solid {border};"
-                f"border-radius:8px;padding:12px 16px;font-family:monospace'>"
-                f"<div style='font-size:15px;color:{color};margin-bottom:8px'>{msg_top}</div>"
-                f"{opts_html}"
-                f"<div style='font-size:11px;color:#666;margin-top:6px'>"
-                f"{winner.title()} — {wins} victorias en F1{champ_str}</div>"
-                f"</div>"
-            ))
-
-            btn_next = widgets.Button(
-                description="▶️ Siguiente",
-                button_style="warning",
-                layout=widgets.Layout(width="140px", margin="8px 0 0 0")
-            )
-            btn_next.on_click(self._new_question)
-            parts.append(btn_next)
-
-        self.output.clear_output(wait=True)
-        with self.output:
-            display(widgets.VBox(parts))
-
-
-# ══════════════════════════════════════════════════════════════════
-#  BASE DE DATOS — CIRCUITOS F1
+#  MODO 9 — CIRCUITOS F1
 # ══════════════════════════════════════════════════════════════════
 F1_CIRCUITS = {
     "monaco": {
@@ -7453,385 +5523,3 @@ F1_CIRCUITS = {
     },
 }
 
-
-# ══════════════════════════════════════════════════════════════════
-#  MODO 9 — ¿EN QUÉ CIRCUITO?
-# ══════════════════════════════════════════════════════════════════
-class CircuitGame:
-    """
-    Pistas progresivas sobre un circuito F1.
-    Elegís entre 4 opciones. Menos pistas usadas = más puntos.
-    Modo diario + racha + persistencia.
-    """
-    PTS_PER_PISTA = [600, 450, 300, 200, 100, 50]
-
-    FLAG_MAP = {
-        "Mónaco": "🇲🇨", "Italia": "🇮🇹", "Gran Bretaña": "🇬🇧", "Bélgica": "🇧🇪",
-        "Japón": "🇯🇵", "Brasil": "🇧🇷", "España": "🇪🇸", "Emiratos Árabes": "🇦🇪",
-        "Hungría": "🇭🇺", "Países Bajos": "🇳🇱", "Alemania": "🇩🇪", "Arabia Saudí": "🇸🇦",
-        "Bahréin": "🇧🇭", "Australia": "🇦🇺", "China": "🇨🇳", "Estados Unidos": "🇺🇸",
-        "México": "🇲🇽", "Singapur": "🇸🇬", "Azerbaiyán": "🇦🇿", "Canadá": "🇨🇦",
-        "Catar": "🇶🇦", "Francia": "🇫🇷", "Portugal": "🇵🇹", "Turquía": "🇹🇷",
-    }
-
-    def __init__(self):
-        self._score         = 0
-        self._streak        = 0
-        self._best_streak   = 0
-        self._total         = 0
-        self._correct       = 0
-        self._pistas_vistas = 0
-        self._answered      = False
-        self._circuit_key   = None
-        self._options       = []
-        self._vistos        = set()
-        self.daily          = False
-
-        self._load_pts()
-        self._build_ui()
-
-    # ── Persistencia ─────────────────────────────────────────────
-    def _data_path(self):
-        import os
-        return os.path.expanduser("~/.f1grid_data.json")
-
-    def _load_pts(self):
-        import json, os
-        try:
-            d = json.loads(open(self._data_path()).read())
-            self._score       = d.get("circuit_score", 0)
-            self._streak      = d.get("circuit_streak", 0)
-            self._best_streak = d.get("circuit_best", 0)
-        except Exception:
-            pass
-
-    def _save_pts(self, pts):
-        import json, os
-        p = self._data_path()
-        try:
-            d = json.loads(open(p).read()) if os.path.exists(p) else {}
-        except Exception:
-            d = {}
-        d["circuit_score"]  = d.get("circuit_score", 0) + pts
-        d["circuit_streak"] = self._streak
-        d["circuit_best"]   = self._best_streak
-        self._score = d["circuit_score"]
-        open(p, "w").write(json.dumps(d))
-
-    def _already_played_daily(self):
-        import datetime, json, os
-        today = datetime.date.today().isoformat()
-        key   = f"circuit-daily-{today}"
-        try:
-            d = json.loads(open(self._data_path()).read())
-            return d.get("daily_played", {}).get(key, False)
-        except Exception:
-            return False
-
-    def _mark_daily_played(self):
-        import datetime, json, os
-        today = datetime.date.today().isoformat()
-        key   = f"circuit-daily-{today}"
-        p     = self._data_path()
-        try:
-            d = json.loads(open(p).read()) if os.path.exists(p) else {}
-        except Exception:
-            d = {}
-        d.setdefault("daily_played", {})[key] = True
-        open(p, "w").write(json.dumps(d))
-
-    def _daily_seed(self):
-        import datetime, hashlib
-        today  = datetime.date.today().isoformat()
-        digest = int(hashlib.md5(f"circuit-{today}".encode()).hexdigest(), 16)
-        return digest % (2**31)
-
-    # ── Construcción de UI ────────────────────────────────────────
-    def _build_ui(self):
-        title = widgets.HTML(
-            "<div style='font-family:monospace;text-align:center;padding:10px 0 4px'>"
-            "<span style='font-size:22px;font-weight:bold;color:#1565c0'>🗺️ ¿EN QUÉ CIRCUITO?</span>"
-            "<br><span style='font-size:11px;color:#888'>"
-            "Pistas progresivas · Menos pistas = más puntos · 24 circuitos F1</span>"
-            "</div>"
-        )
-
-        self.btn_new   = widgets.Button(
-            description="🆕 Nuevo Circuito", button_style="primary",
-            layout=widgets.Layout(width="160px", height="38px"),
-        )
-        self.btn_daily = widgets.ToggleButton(
-            value=False, description="📅 Diario",
-            button_style="", layout=widgets.Layout(width="110px", height="38px"),
-        )
-        self.btn_pista = widgets.Button(
-            description="💡 Ver Pista", button_style="warning",
-            layout=widgets.Layout(width="120px", height="38px"),
-        )
-
-        self.stats_html = widgets.HTML(self._stats_markup())
-        self.pts_html   = widgets.HTML(self._pts_markup())
-
-        self.btn_new.on_click(lambda _: self._new_question())
-        self.btn_daily.observe(self._on_daily_toggle, names="value")
-        self.btn_pista.on_click(lambda _: self._ver_pista())
-
-        self.game_out = widgets.Output()
-
-        top_bar = widgets.HBox(
-            [self.btn_new, self.btn_daily, self.btn_pista,
-             self.stats_html, self.pts_html],
-            layout=widgets.Layout(gap="10px", align_items="center",
-                                  flex_flow="row wrap", margin="6px 0"),
-        )
-
-        self.main = widgets.VBox(
-            [title, top_bar, self.game_out],
-            layout=widgets.Layout(
-                padding="14px", border="2px solid #1565c0",
-                border_radius="10px", max_width="820px",
-            ),
-        )
-        display(self.main)
-        self._new_question()
-
-    def _pts_markup(self):
-        return (f"<span style='font-family:monospace;font-size:13px;color:#ffd700'>"
-                f"⭐ {self._score} pts</span>")
-
-    def _stats_markup(self):
-        pct = int(self._correct / self._total * 100) if self._total else 0
-        return (
-            f"<span style='font-family:monospace;font-size:12px;color:#aaa'>"
-            f"🔥 {self._streak} &nbsp;|&nbsp; "
-            f"✅ {self._correct}/{self._total} ({pct}%) &nbsp;|&nbsp;"
-            f" 🏅 {self._best_streak}</span>"
-        )
-
-    def _on_daily_toggle(self, change):
-        self.btn_daily.description  = "📅 Diario ON" if change["new"] else "📅 Diario"
-        self.btn_daily.button_style = "warning"      if change["new"] else ""
-        self.daily = change["new"]
-        self._new_question()
-
-    # ── Lógica de pregunta ────────────────────────────────────────
-    def _pick_circuit(self, seed=None):
-        import random
-        rng = random.Random(seed) if seed is not None else random
-
-        all_keys = list(F1_CIRCUITS.keys())
-
-        if seed is not None:
-            key = rng.choice(all_keys)
-        else:
-            available = [k for k in all_keys if k not in self._vistos]
-            if not available:
-                self._vistos = set()
-                available = all_keys
-            key = rng.choice(available)
-
-        self._vistos.add(key)
-
-        others     = [k for k in all_keys if k != key]
-        distractors = rng.sample(others, min(3, len(others)))
-        options     = [key] + distractors
-        rng.shuffle(options)
-        return key, options
-
-    def _new_question(self, b=None):
-        if self.daily:
-            if self._already_played_daily():
-                with self.game_out:
-                    clear_output(wait=True)
-                    display(widgets.HTML(
-                        "<div style='font-family:monospace;color:#ff9800;padding:12px;"
-                        "text-align:center;font-size:14px'>"
-                        "📅 Ya jugaste el circuito del día. ¡Volvé mañana!</div>"
-                    ))
-                return
-            seed = self._daily_seed()
-            self._circuit_key, self._options = self._pick_circuit(seed=seed)
-        else:
-            self._circuit_key, self._options = self._pick_circuit()
-
-        self._pistas_vistas = 1
-        self._answered      = False
-        self._render()
-
-    def _ver_pista(self):
-        if self._answered:
-            return
-        data  = F1_CIRCUITS[self._circuit_key]
-        total = len(data["caracteristicas"])
-        if self._pistas_vistas < total:
-            self._pistas_vistas += 1
-            self._render()
-
-    # ── Respuesta ─────────────────────────────────────────────────
-    def _answer(self, chosen_key):
-        if self._answered:
-            return
-        self._answered = True
-        self._total   += 1
-        correct = (chosen_key == self._circuit_key)
-
-        if correct:
-            self._correct += 1
-            self._streak  += 1
-            if self._streak > self._best_streak:
-                self._best_streak = self._streak
-            pts_idx = min(self._pistas_vistas - 1, len(self.PTS_PER_PISTA) - 1)
-            pts     = self.PTS_PER_PISTA[pts_idx]
-            if self._streak > 1:
-                bonus = min(self._streak - 1, 5) * 30
-                pts  += bonus
-            self._save_pts(pts)
-        else:
-            self._streak = 0
-            pts = 0
-            self._save_pts(0)
-
-        if self.daily:
-            self._mark_daily_played()
-
-        self.stats_html.value = self._stats_markup()
-        self.pts_html.value   = self._pts_markup()
-        self._render(result_pts=pts, result_correct=correct, chosen_key=chosen_key)
-
-    # ── Render ────────────────────────────────────────────────────
-    def _render(self, result_pts=None, result_correct=None, chosen_key=None):
-        data     = F1_CIRCUITS[self._circuit_key]
-        all_data = F1_CIRCUITS
-        parts    = []
-
-        # ── Pistas mostradas ──────────────────────────────────
-        pistas_html = ""
-        for i in range(self._pistas_vistas):
-            if i < len(data["caracteristicas"]):
-                pts_si = self.PTS_PER_PISTA[min(i, len(self.PTS_PER_PISTA) - 1)]
-                pts_label = (f"· <span style='color:#ffd700'>{pts_si} pts</span>"
-                             if not self._answered else "")
-                pistas_html += (
-                    f"<div style='background:#111;border-left:3px solid #1565c0;"
-                    f"border-radius:0 6px 6px 0;padding:8px 14px;margin:4px 0;"
-                    f"font-family:monospace;font-size:13px;color:#ddd'>"
-                    f"<span style='color:#555;font-size:10px'>PISTA {i+1} {pts_label}"
-                    f"</span><br>{data['caracteristicas'][i]}</div>"
-                )
-
-        total_pistas = len(data["caracteristicas"])
-        pts_ahora    = self.PTS_PER_PISTA[min(self._pistas_vistas - 1, len(self.PTS_PER_PISTA) - 1)]
-        pts_label_hdr = (f"&nbsp;·&nbsp; <span style='color:#ffd700'>+{pts_ahora} pts si acertás ahora</span>"
-                         if not self._answered else "")
-
-        header_txt = (
-            f"<div style='font-family:monospace;padding:8px 0'>"
-            f"<span style='color:#888;font-size:12px'>"
-            f"Pistas vistas: <b style='color:#fff'>{self._pistas_vistas}/{total_pistas}</b>"
-            f"{pts_label_hdr}</span></div>"
-            f"{pistas_html}"
-        )
-        parts.append(widgets.HTML(header_txt))
-
-        if not self._answered:
-            # ── Botones de opción ──────────────────────────────
-            btn_rows = []
-            row = []
-            for opt_key in self._options:
-                opt_data = all_data[opt_key]
-                flag     = self.FLAG_MAP.get(opt_data["pais"], "🏁")
-                btn = widgets.Button(
-                    description=f"{flag} {opt_data['display']}",
-                    layout=widgets.Layout(width="230px", height="46px"),
-                    style={"font_size": "13px", "font_weight": "bold"},
-                )
-                btn.on_click(lambda b, k=opt_key: self._answer(k))
-                row.append(btn)
-                if len(row) == 2:
-                    btn_rows.append(widgets.HBox(
-                        row, layout=widgets.Layout(gap="10px", margin="4px 0")))
-                    row = []
-            if row:
-                btn_rows.append(widgets.HBox(
-                    row, layout=widgets.Layout(gap="10px", margin="4px 0")))
-            parts.append(widgets.VBox(
-                btn_rows, layout=widgets.Layout(margin="10px 0 4px")))
-
-        else:
-            # ── Resultado ─────────────────────────────────────
-            bg     = "#0a2a0a" if result_correct else "#2a0a0a"
-            border = "#2e7d32" if result_correct else "#c62828"
-            color  = "#00c853" if result_correct else "#ef9a9a"
-            icon   = "✅"      if result_correct else "❌"
-            streak_bonus = (min(self._streak - 1, 5) * 30
-                            if result_correct and self._streak > 1 else 0)
-
-            if result_correct:
-                msg = (f"{icon} ¡CORRECTO! +{result_pts} pts"
-                       + (f" (racha ×{self._streak} +{streak_bonus})" if streak_bonus else ""))
-            else:
-                msg = f"{icon} INCORRECTO — Era <b style='color:#ffd700'>{data['display']}</b>"
-
-            # Opciones coloreadas
-            opts_html = "<div style='display:flex;flex-wrap:wrap;gap:8px;margin:10px 0'>"
-            for opt_key in self._options:
-                opt_d = all_data[opt_key]
-                flag  = self.FLAG_MAP.get(opt_d["pais"], "🏁")
-                if opt_key == self._circuit_key:
-                    c = "#00c853"; bc = "#2e7d32"; bg2 = "#0a2a0a"
-                elif opt_key == chosen_key and not result_correct:
-                    c = "#ef9a9a"; bc = "#c62828"; bg2 = "#2a0a0a"
-                else:
-                    c = "#555"; bc = "#333"; bg2 = "#0a0a0a"
-                opts_html += (
-                    f"<span style='background:{bg2};border:1px solid {bc};"
-                    f"border-radius:6px;padding:6px 14px;"
-                    f"font-family:monospace;font-size:13px;color:{c}'>"
-                    f"{flag} {opt_d['display']}</span>"
-                )
-            opts_html += "</div>"
-
-            win_str   = " · ".join(w.title() for w in data["ganadores"][:3])
-            info_html = (
-                f"<div style='font-size:11px;color:#666;margin-top:6px;font-family:monospace'>"
-                f"📍 {data['ciudad']}, {data['pais']} &nbsp;·&nbsp; "
-                f"📏 {data['longitud']} km &nbsp;·&nbsp; "
-                f"🏁 Primer GP: {data['primer_gp']}<br>"
-                f"🏆 Ganadores históricos: {win_str}<br>"
-                f"💬 Apodo: <i>{data.get('apodo', '')}</i>"
-                f"</div>"
-            )
-
-            # Todas las pistas reveladas
-            todas_pistas = ""
-            for i, pista in enumerate(data["caracteristicas"]):
-                op = "1" if i < self._pistas_vistas else "0.35"
-                todas_pistas += (
-                    f"<div style='opacity:{op};font-family:monospace;font-size:11px;"
-                    f"color:#aaa;padding:3px 8px;border-left:2px solid #333;margin:2px 0'>"
-                    f"Pista {i+1}: {pista}</div>"
-                )
-
-            parts.append(widgets.HTML(
-                f"<div style='background:{bg};border:2px solid {border};"
-                f"border-radius:8px;padding:12px 16px;font-family:monospace'>"
-                f"<div style='font-size:15px;color:{color};margin-bottom:6px'>{msg}</div>"
-                f"{opts_html}"
-                f"{info_html}"
-                f"</div>"
-                f"<div style='margin-top:10px'>"
-                f"<b style='font-family:monospace;font-size:12px;color:#555'>"
-                f"Todas las pistas:</b>{todas_pistas}</div>"
-            ))
-
-            btn_next = widgets.Button(
-                description="▶️ Siguiente Circuito",
-                button_style="primary",
-                layout=widgets.Layout(width="190px", height="38px", margin="10px 0 0"),
-            )
-            btn_next.on_click(lambda _: self._new_question())
-            parts.append(btn_next)
-
-        self.game_out.clear_output(wait=True)
-        with self.game_out:
-            display(widgets.VBox(parts))
