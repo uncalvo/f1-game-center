@@ -28,8 +28,8 @@ st.markdown("""
   &quot;background_color&quot;: &quot;#0f0f0f&quot;,
   &quot;theme_color&quot;: &quot;#e10600&quot;,
   &quot;icons&quot;: [
-    {&quot;src&quot;: &quot;https://raw.githubusercontent.com/uncalvo/f1-icons/main/icon-192.png&quot;, &quot;sizes&quot;: &quot;192x192&quot;, &quot;type&quot;: &quot;image/png&quot;},
-    {&quot;src&quot;: &quot;https://raw.githubusercontent.com/uncalvo/f1-icons/main/icon-512.png&quot;, &quot;sizes&quot;: &quot;512x512&quot;, &quot;type&quot;: &quot;image/png&quot;}
+    {&quot;src&quot;: &quot;https://raw.githubusercontent.com/uncalvo/f1-game-center/main/static/icon-192.png&quot;, &quot;sizes&quot;: &quot;192x192&quot;, &quot;type&quot;: &quot;image/png&quot;},
+    {&quot;src&quot;: &quot;https://raw.githubusercontent.com/uncalvo/f1-game-center/main/static/icon-512.png&quot;, &quot;sizes&quot;: &quot;512x512&quot;, &quot;type&quot;: &quot;image/png&quot;}
   ]
 }">
 """, unsafe_allow_html=True)
