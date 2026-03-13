@@ -18,20 +18,18 @@ st.markdown("""
     div[data-testid="stButton"] button { border-radius: 8px; font-weight: bold; }
     .stTextInput input { border-radius: 8px; }
     .stSelectbox select { border-radius: 8px; }
-    /* Header rojo F1 */
     h1, h2, h3 { color: #f0f0f0 !important; }
 </style>
-""", unsafe_allow_html=True)
-<link rel="manifest" href="data:application/json,{
-  'name': 'F1 Game Center',
-  'short_name': 'F1 Games',
-  'start_url': '/',
-  'display': 'standalone',
-  'background_color': '#0f0f0f',
-  'theme_color': '#e10600',
-  'icons': [
-    {'src': 'https://raw.githubusercontent.com/uncalvo/f1-icons/main/icon-192.png', 'sizes': '192x192', 'type': 'image/png'},
-    {'src': 'https://raw.githubusercontent.com/uncalvo/f1-icons/main/icon-512.png', 'sizes': '512x512', 'type': 'image/png'}
+<link rel="manifest" href="data:application/manifest+json,{
+  &quot;name&quot;: &quot;F1 Game Center&quot;,
+  &quot;short_name&quot;: &quot;F1 Games&quot;,
+  &quot;start_url&quot;: &quot;/&quot;,
+  &quot;display&quot;: &quot;standalone&quot;,
+  &quot;background_color&quot;: &quot;#0f0f0f&quot;,
+  &quot;theme_color&quot;: &quot;#e10600&quot;,
+  &quot;icons&quot;: [
+    {&quot;src&quot;: &quot;https://raw.githubusercontent.com/uncalvo/f1-icons/main/icon-192.png&quot;, &quot;sizes&quot;: &quot;192x192&quot;, &quot;type&quot;: &quot;image/png&quot;},
+    {&quot;src&quot;: &quot;https://raw.githubusercontent.com/uncalvo/f1-icons/main/icon-512.png&quot;, &quot;sizes&quot;: &quot;512x512&quot;, &quot;type&quot;: &quot;image/png&quot;}
   ]
 }">
 """, unsafe_allow_html=True)
@@ -67,7 +65,6 @@ with st.sidebar:
 module_name = GAMES.get(selection)
 
 if module_name is None:
-    # Pantalla de inicio
     st.markdown("""
     <div style='text-align:center;padding:30px 0'>
         <div style='font-size:64px'>🏎️</div>
@@ -111,7 +108,6 @@ if module_name is None:
 else:
     try:
         import importlib.util, pathlib
-        # Buscar la carpeta 'games' recorriendo desde __file__ hacia arriba y abajo
         candidates = [
             pathlib.Path(__file__).parent / "games",
             pathlib.Path("games"),
@@ -120,7 +116,6 @@ else:
         games_dir = next((p for p in candidates if p.is_dir()), None)
 
         if games_dir is None:
-            # Mostrar info de debug
             import os as _os
             cwd = _os.getcwd()
             here = str(pathlib.Path(__file__).parent)
