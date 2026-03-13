@@ -22,6 +22,19 @@ st.markdown("""
     h1, h2, h3 { color: #f0f0f0 !important; }
 </style>
 """, unsafe_allow_html=True)
+<link rel="manifest" href="data:application/json,{
+  'name': 'F1 Game Center',
+  'short_name': 'F1 Games',
+  'start_url': '/',
+  'display': 'standalone',
+  'background_color': '#0f0f0f',
+  'theme_color': '#e10600',
+  'icons': [
+    {'src': 'https://raw.githubusercontent.com/uncalvo/f1-icons/main/icon-192.png', 'sizes': '192x192', 'type': 'image/png'},
+    {'src': 'https://raw.githubusercontent.com/uncalvo/f1-icons/main/icon-512.png', 'sizes': '512x512', 'type': 'image/png'}
+  ]
+}">
+""", unsafe_allow_html=True)
 
 GAMES = {
     "🏠 Inicio":              None,
