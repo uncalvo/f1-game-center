@@ -9,11 +9,46 @@ STAT_LABELS = {
     "campeonatos":  ("Campeonatos",  "campeonatos del mundo"),
 }
 
+CHAMPIONSHIPS = {
+    "michael schumacher": 7,
+    "lewis hamilton":     7,
+    "juan manuel fangio": 5,
+    "alain prost":        4,
+    "sebastian vettel":   4,
+    "max verstappen":     4,
+    "ayrton senna":       3,
+    "jack brabham":       3,
+    "jackie stewart":     3,
+    "niki lauda":         3,
+    "nelson piquet":      3,
+    "mika häkkinen":      2,
+    "emerson fittipaldi": 2,
+    "graham hill":        2,
+    "jim clark":          2,
+    "fernando alonso":    2,
+    "alberto ascari":     2,
+    "mike hawthorn":      1,
+    "phil hill":          1,
+    "john surtees":       1,
+    "denny hulme":        1,
+    "jochen rindt":       1,
+    "jody scheckter":     1,
+    "keke rosberg":       1,
+    "nigel mansell":      1,
+    "damon hill":         1,
+    "jacques villeneuve": 1,
+    "kimi räikkönen":     1,
+    "jenson button":      1,
+    "nico rosberg":       1,
+    "mario andretti":     1,
+    "alan jones":         1,
+}
+
 def _get_val(name, stat):
     d = RAW_F1[name]
     if stat == "victorias":   return d[2]
     if stat == "podios":      return d[3]
-    if stat == "campeonatos": return 1 if d[4] else 0
+    if stat == "campeonatos": return CHAMPIONSHIPS.get(name.lower(), 1 if d[4] else 0)
     return 0
 
 def _pool():
@@ -104,7 +139,6 @@ def render():
                     st.rerun()
                 return
 
-    # Header stats
     c1, c2, c3 = st.columns(3)
     c1.metric("🔥 Racha", st.session_state.du_streak)
     c2.metric("🏅 Mejor", st.session_state.du_best)
